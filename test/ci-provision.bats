@@ -5,10 +5,11 @@ setup() {
     # Variables de entorno para tests
     export SCRIPT="./ci-provision.sh"
     export TEST_VM_NAME="test-vm-$$"
-    export TEST_DISK="/tmp/test-disk-$$.qcow2"
+    export TEST_DISK="$HOME/imagenesMV/test-disk-$$.qcow2"
     export TEST_HOSTNAME="test-host"
     export TEST_NETWORK="default"
     export SILO_DIR="$HOME/imagenesMV"
+    export DEBIAN_BASE="$HOME/imagenesMV/debian12.qcow2"
     
     # Crear directorio de pruebas si no existe
     mkdir -p "$SILO_DIR"
@@ -112,6 +113,19 @@ teardown() {
     rm -f "$test_disk"
 }
 
+@test "acepta disco válido con backing file correcto" {
+    skip "Requiere debian12.qcow2 en $SILO_DIR"
+    
+    # Verificar que existe debian12.qcow2
+    [ -f "$DEBIAN_BASE" ]
+    
+    # Crear disco de prueba con backing correcto
+    qemu-img create -f qcow2 -b "$DEBIAN_BASE" -F qcow2 "$TEST_DISK" 10G
+    
+    run bash "$SCRIPT" "$TEST_VM_NAME" "$TEST_DISK" "$TEST_HOSTNAME" "$TEST_NETWORK"
+    assert_success
+}
+
 #############################################
 # PRUEBAS DE VALIDACIÓN DE RED
 #############################################
@@ -122,6 +136,16 @@ teardown() {
     run bash "$SCRIPT" "$TEST_VM_NAME" "$TEST_DISK" "$TEST_HOSTNAME" "red-inexistente"
     assert_failure
     assert_output --partial "ERROR: La red 'red-inexistente' no existe"
+}
+
+@test "acepta red existente" {
+    skip "Requiere disco válido y red configurada"
+    
+    # Verificar que existe la red
+    virsh net-list --all | grep -q "$TEST_NETWORK"
+    
+    run bash "$SCRIPT" "$TEST_VM_NAME" "$TEST_DISK" "$TEST_HOSTNAME" "$TEST_NETWORK"
+    assert_success
 }
 
 #############################################
@@ -142,6 +166,16 @@ teardown() {
     assert_output --partial "ssh-keygen"
     
     mv "$backup" "$ssh_key" 2>/dev/null || true
+}
+
+@test "carga correctamente clave pública existente" {
+    skip "Requiere disco y red válidos"
+    
+    # Verificar que existe la clave
+    [ -f "$HOME/.ssh/id_rsa.pub" ]
+    
+    run bash "$SCRIPT" "$TEST_VM_NAME" "$TEST_DISK" "$TEST_HOSTNAME" "$TEST_NETWORK"
+    assert_success
 }
 
 #############################################
@@ -297,4 +331,35 @@ teardown() {
     assert_output --partial "Root:"
     assert_output --partial "Habilitado SOLO consola"
     assert_output --partial "Contraseña: s1st3mas"
+}
+
+#############################################
+# PRUEBAS DE INTEGRACIÓN COMPLETA
+#############################################
+
+@test "integración: crear VM completa con todas las opciones" {
+    skip "Test de integración completa - ejecutar manualmente"
+    
+    # Verificar prerequisitos
+    [ -f "$DEBIAN_BASE" ]
+    [ -f "$HOME/.ssh/id_rsa.pub" ]
+    virsh net-list --all | grep -q "$TEST_NETWORK"
+    
+    # Crear disco de prueba
+    qemu-img create -f qcow2 -b "$DEBIAN_BASE" -F qcow2 "$TEST_DISK" 20G
+    
+    # Crear VM con todas las opciones
+    run bash "$SCRIPT" --enable-root --user-pass "test123" \
+        "$TEST_VM_NAME" "$TEST_DISK" "$TEST_HOSTNAME" "$TEST_NETWORK" \
+        "192.168.1.100" 4096 4
+    
+    assert_success
+    
+    # Verificar que la VM existe
+    virsh list --all | grep -q "$TEST_VM_NAME"
+    
+    # Verificar archivos cloud-init
+    [ -f "./cloudinit-${TEST_VM_NAME}/cip-user.yaml" ]
+    [ -f "./cloudinit-${TEST_VM_NAME}/cip-meta.yaml" ]
+    [ -f "./cloudinit-${TEST_VM_NAME}/cip-net.yaml" ]
 }
