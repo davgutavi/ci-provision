@@ -222,7 +222,7 @@ Cada provisión crea:
 cloudinit-NOMBRE_VM/
  ├── cip-meta.yaml
  ├── cip-user.yaml
- └── cip-net.yaml   (solo si usaste IP estática)
+ └── cip-net.yaml   (sólo si usaste IP estática)
 ```
 
 ---
