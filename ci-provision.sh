@@ -22,31 +22,47 @@ VCPUS=""
 SILO_DIR="$HOME/imagenesMV"
 
 #############################################
-# FUNCIONES
+# AYUDA
 #############################################
 
 print_help() {
 cat <<EOF
 Uso:
-  ci-provision [OPCIONES] NOMBRE_VM DISCO HOSTNAME RED [IP] [RAM_MB] [CORES]
+  $0 [OPCIONES] NOMBRE_VM DISCO HOSTNAME RED [IP] [RAM_MB] [CORES]
 
 Descripción:
   Provisiona una máquina virtual Debian 12 con cloud-init.
   Usuario principal: administrador (clave pública obligatoria).
   Contraseña opcional con --user-pass.
-  Root solo por consola si se usa --enable-root.
+  Root opcional SOLO por consola con --enable-root.
 
-Reglas:
-  * DISCO puede ser ruta absoluta o relativa.
-  * El disco debe estar en \$HOME/imagenesMV.
-  * Debe ser qcow2 con backing file debian12.qcow2.
+Parámetros:
+  NOMBRE_VM   Nombre de la máquina virtual (dominio libvirt).
+  DISCO       Ruta (relativa o absoluta) al disco qcow2 dentro de \$HOME/imagenesMV.
+  HOSTNAME    Nombre interno de la máquina.
+  RED         Nombre de la red virtual existente (virsh net-list).
+  IP          (opcional) IP estática. Si se omite, se usa DHCP.
+  RAM_MB      (opcional) Memoria RAM en MB. Por defecto 2048.
+  CORES       (opcional) Número de vCPUs. Por defecto 2.
 
 Opciones:
-  --enable-root        Habilita root solo para consola (s1st3mas)
-  --user-pass PASS     Habilita contraseña para administrador
-  -h, --help           Mostrar ayuda
+  --user-pass PASS   Establece contraseña para el usuario 'administrador'.
+                     (Sigue pudiendo entrar por SSH con clave pública).
+  --enable-root      Habilita usuario root SOLO por consola
+                     con contraseña 's1st3mas' usando cloud-init.
+  -h, --help         Muestra esta ayuda.
+
+Ejemplos:
+  $0 usuario-server1 server1.qcow2 server1 usuario-red
+  $0 usuario-server2 server2.qcow2 server2 usuario-red 192.168.2.20
+  $0 --user-pass 1234 usuario-server3 server3.qcow2 server3 usuario-red
+  $0 --enable-root usuario-server4 server4.qcow2 server4 usuario-red
 EOF
 }
+
+#############################################
+# VALIDACIONES
+#############################################
 
 validate_disk() {
     local input="$1"
@@ -95,11 +111,15 @@ load_public_key() {
     if [[ ! -f "$key" ]]; then
         echo "ERROR: No se encontró $key"
         echo "Genera una clave con:"
-        echo "  ssh-keygen"
+        echo "  ssh-keygen -t rsa -b 4096"
         exit 1
     fi
     PUBKEY="$(cat "$key")"
 }
+
+#############################################
+# GENERACIÓN DE FICHEROS CLOUD-INIT
+#############################################
 
 generate_cloudinit_files() {
     local vm="$1"
@@ -112,39 +132,56 @@ generate_cloudinit_files() {
     USER_DATA="$WORKDIR/cip-user.yaml"
     META_DATA="$WORKDIR/cip-meta.yaml"
 
+    # meta-data
     cat > "$META_DATA" <<EOF
 instance-id: ${vm}
 local-hostname: ${host}
 EOF
 
-cat > "$USER_DATA" <<EOF
-#cloud-config
-users:
-  - name: administrador
-    groups: [sudo]
-    shell: /bin/bash
-    sudo: ['ALL=(ALL) NOPASSWD:ALL']
-    ssh-authorized-keys:
-      - $PUBKEY
-EOF
+    # user-data (se genera de forma programática)
+    local chpass_list=""
+    local ssh_pwauth=false
 
     if [[ -n "$USER_PASS" ]]; then
-cat >> "$USER_DATA" <<EOF
-
-ssh_pwauth: true
-chpasswd:
-  list: |
-    administrador:${USER_PASS}
-  expire: false
-EOF
+        chpass_list+="administrador:${USER_PASS}"$'\n'
+        ssh_pwauth=true
     fi
 
+    if $ENABLE_ROOT; then
+        chpass_list+="root:s1st3mas"$'\n'
+    fi
+
+    {
+        echo "#cloud-config"
+        echo "users:"
+        echo "  - name: administrador"
+        echo "    groups: [sudo]"
+        echo "    shell: /bin/bash"
+        echo "    sudo: ['ALL=(ALL) NOPASSWD:ALL']"
+        echo "    ssh-authorized-keys:"
+        echo "      - ${PUBKEY}"
+
+        if [[ -n "$chpass_list" ]]; then
+            if $ssh_pwauth; then
+                echo "ssh_pwauth: true"
+            fi
+            echo "chpasswd:"
+            echo "  list: |"
+            # Imprimimos cada línea con la indentación adecuada
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && echo "    $line"
+            done <<< "$chpass_list"
+            echo "  expire: false"
+        fi
+    } > "$USER_DATA"
+
+    # network-config (solo si IP estática)
     if [[ -n "$IP" ]]; then
         NETWORK_DATA="$WORKDIR/cip-net.yaml"
         local gw
         gw="$(echo "$IP" | awk -F. '{print $1"."$2"."$3".1"}')"
 
-cat > "$NETWORK_DATA" <<EOF
+        cat > "$NETWORK_DATA" <<EOF
 version: 2
 ethernets:
   enp1s0:
@@ -161,8 +198,12 @@ EOF
     fi
 }
 
+#############################################
+# CREACIÓN DE LA VM
+#############################################
+
 create_vm_cloudinit() {
-    echo "→ Creando VM…"
+    echo "→ Creando VM '${NOMBRE_VM}' con cloud-init…"
     if [[ -n "$NETWORK_DATA" ]]; then
         virt-install --name "$NOMBRE_VM" \
             --ram "$RAM" --vcpus "$VCPUS" \
@@ -186,39 +227,9 @@ create_vm_cloudinit() {
     fi
 }
 
-wait_cloudinit_boot() {
-    echo "→ Esperando a que cloud-init termine el primer arranque (45s)…"
-    sleep 45
-}
-
-shutdown_vm() {
-    echo "→ Solicitando apagado de la VM…"
-    virsh shutdown "$NOMBRE_VM" >/dev/null 2>&1 || true
-
-    # Espera hasta 60 segundos
-    for i in {1..60}; do
-        state="$(virsh domstate "$NOMBRE_VM" 2>/dev/null || true)"
-        if [[ "$state" == "shut off" ]]; then
-            echo "→ VM apagada correctamente."
-            return
-        fi
-        sleep 1
-    done
-
-    echo "⚠ Timeout: la VM no respondió a ACPI."
-    echo "→ Forzando apagado inmediato (destroy)…"
-    virsh destroy "$NOMBRE_VM" >/dev/null 2>&1 || true
-}
-
-apply_root_password() {
-    echo "→ Estableciendo contraseña de root con virt-customize…"
-    virt-customize -a "$DISCO" --root-password password:s1st3mas
-}
-
-start_vm() {
-    echo "→ Iniciando VM…"
-    virsh start "$NOMBRE_VM" >/dev/null
-}
+#############################################
+# RESUMEN
+#############################################
 
 summary() {
     echo "-------------------------------------------"
@@ -232,11 +243,11 @@ summary() {
 
     echo
     echo "Usuario 'administrador':"
-    echo "  - Clave pública obligatoria"
+    echo "  - Clave pública: ~/.ssh/id_rsa.pub"
     if [[ -n "$USER_PASS" ]]; then
         echo "  - Contraseña activada: $USER_PASS"
     else
-        echo "  - SIN contraseña"
+        echo "  - SIN contraseña (solo clave SSH)"
     fi
 
     echo
@@ -244,9 +255,10 @@ summary() {
         echo "Root:"
         echo "  - Habilitado SOLO consola"
         echo "  - Contraseña: s1st3mas"
+        echo "  - SSH root sigue DESHABILITADO (config por defecto de la imagen cloud)"
     else
         echo "Root:"
-        echo "  - No habilitado"
+        echo "  - No habilitado explícitamente (se mantiene configuración por defecto de la imagen)"
     fi
     echo "-------------------------------------------"
 }
@@ -260,13 +272,18 @@ while [[ $# -gt 0 ]]; do
         --enable-root)
             ENABLE_ROOT=true; shift ;;
         --user-pass)
+            if [[ $# -lt 2 ]]; then
+                echo "ERROR: --user-pass requiere una contraseña"
+                exit 1
+            fi
             USER_PASS="$2"; shift 2 ;;
         -h|--help)
             print_help; exit 0 ;;
         --)
             shift; break ;;
         -*)
-            echo "ERROR: Opción desconocida: $1"; exit 1 ;;
+            echo "ERROR: Opción desconocida: $1"
+            exit 1 ;;
         *)
             break ;;
     esac
@@ -277,8 +294,8 @@ done
 #############################################
 
 if [[ $# -lt 4 || $# -gt 7 ]]; then
-    echo "ERROR: Número incorrecto de parámetros"
-    echo "Use --help para más info"
+    echo "ERROR: Número incorrecto de parámetros."
+    echo "Use -h para ver la ayuda."
     exit 1
 fi
 
@@ -298,16 +315,5 @@ validate_disk "$DISCO_INPUT"
 validate_network "$RED"
 load_public_key
 generate_cloudinit_files "$NOMBRE_VM" "$HOSTNAME"
-
 create_vm_cloudinit
-wait_cloudinit_boot
-
-if $ENABLE_ROOT; then
-    shutdown_vm
-    apply_root_password
-    start_vm
-else
-    echo "→ Root NO habilitado: no se apaga la VM."
-fi
-
 summary
