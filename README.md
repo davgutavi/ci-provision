@@ -145,26 +145,51 @@ Desde tu silo:
 
 ## 📌 Ejemplos
 
-Todos deben ejecutarse **desde el silo**:
+Todos los ejemplos deben ejecutarse **desde el silo**:
 
-### 1. VM con DHCP
+```bash
+cd $HOME/imagenesMV/
+```
+
+---
+
+### **1. VM con DHCP**
+
 ```bash
 ./ci-provision.sh usuario-server1 server1.qcow2 server1 usuario-red
 ```
 
-### 2. VM con IP estática
+---
+
+### **2. VM con root habilitado SOLO por consola (DHCP)**
+
 ```bash
-./ci-provision.sh usuario-server2 server2.qcow2 server2 usuario-red 192.168.2.20
+./ci-provision.sh --enable-root usuario-server2 server2.qcow2 server2 usuario-red
 ```
 
-### 3. Contraseña para administrador
+---
+
+### **3. VM con root habilitado SOLO por consola e IP estática**
+
 ```bash
-./ci-provision.sh --user-pass 1234 usuario-server3 server3.qcow2 server3 usuario-red
+./ci-provision.sh --enable-root usuario-server3 server3.qcow2 server3 usuario-red 192.168.200.20
 ```
 
-### 4. Root habilitado SOLO por consola
+---
+
+### **4. VM con IP estática**
+
 ```bash
-./ci-provision.sh --enable-root usuario-server4 server4.qcow2 server4 usuario-red
+./ci-provision.sh usuario-server4 server4.qcow2 server4 usuario-red 192.168.200.30
+```
+
+---
+
+### **5. Ejemplo completo (root + contraseña de usuario + IP estática + RAM y vCPUs personalizadas)**
+
+```bash
+./ci-provision.sh --enable-root --user-pass alumno1234 \
+    usuario-server5 server5.qcow2 server5 usuario-red 192.168.2.40 4096 4
 ```
 
 ---
