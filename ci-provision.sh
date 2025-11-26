@@ -183,11 +183,14 @@ EOF
             echo "  expire: false"
         fi
 
+        # Instalación del guest agent en la fase de paquetes
+        echo "package_update: true"
+        echo "packages:"
+        echo "  - qemu-guest-agent"
+
         # Acciones al primer arranque
         echo "runcmd:"
         echo "  - timedatectl set-timezone Europe/Madrid"
-        echo "  - apt update"
-        echo "  - apt install -y qemu-guest-agent"
         echo "  - systemctl start qemu-guest-agent"
     } > "$USER_DATA"
 
