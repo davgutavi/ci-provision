@@ -1,106 +1,199 @@
 #!/bin/bash
 set -euo pipefail
 
-#############################################
-# VARIABLES GLOBALES
-#############################################
+########################################
+# Configuración general
+########################################
+SILO_DIR="$HOME/imagenesMV"
+PUBKEY_PATH="$HOME/.ssh/id_rsa.pub"
 
-ENABLE_ROOT=false
+########################################
+# Variables de opciones (por defecto)
+########################################
 USER_PASS=""
-PUBKEY=""
+ENABLE_ROOT=false
+ENABLE_GRAPHICS=false
+EXTRA_DISKS=false
+
+VM_NAME=""
+DISK_ARG=""
+DISK_PATH=""
+HOSTNAME=""
+NET_NAME=""
+IP=""
+RAM_MB=2048
+VCPUS=2
+
 WORKDIR=""
 USER_DATA=""
 META_DATA=""
 NETWORK_DATA=""
-NOMBRE_VM=""
-DISCO=""
-HOSTNAME=""
-RED=""
-IP=""
-RAM=""
-VCPUS=""
-SILO_DIR="$HOME/imagenesMV"
 
-#############################################
-# FUNCIONES
-#############################################
-
+########################################
+# Función de ayuda
+########################################
 print_help() {
-cat <<EOF
+    cat <<EOF
 Uso:
-  ci-provision [OPCIONES] NOMBRE_VM DISCO HOSTNAME RED [IP] [RAM_MB] [CORES]
-
-Descripción:
-  Provisiona una máquina virtual Debian 12 con cloud-init.
-  Usuario principal: administrador (clave pública obligatoria).
-  Contraseña opcional con --user-pass.
-  Root solo por consola si se usa --enable-root.
-
-Reglas:
-  * DISCO puede ser ruta absoluta o relativa.
-  * El disco debe estar en \$HOME/imagenesMV.
-  * Debe ser qcow2 con backing file debian12.qcow2.
+  $0 [opciones] NOMBRE_VM DISCO HOSTNAME RED [IP] [RAM_MB] [VCPUS]
 
 Opciones:
-  --enable-root        Habilita root solo para consola (s1st3mas)
-  --user-pass PASS     Habilita contraseña para administrador
-  -h, --help           Mostrar ayuda
+  --user-pass PASS     Establece contraseña para el usuario 'administrador'
+  --enable-root        Habilita root SOLO por consola (contraseña: s1st3mas)
+  --virt-viewer        Habilita gráficos SPICE (virt-viewer)
+  --extra-disks        Crea y adjunta discos extra vdb..vdg en el silo
+  -h, --help           Muestra esta ayuda
+
+Parámetros:
+  NOMBRE_VM            Nombre del dominio en libvirt (p.ej., alu345-server1)
+  DISCO                Archivo .qcow2 (debe estar dentro del silo)
+  HOSTNAME             Nombre interno de la máquina
+  RED                  Nombre de la red virtual
+  IP                   (Opcional) IP fija (si no → DHCP)
+  RAM_MB               (Opcional) Memoria en MB (por defecto 2048)
+  VCPUS                (Opcional) Núcleos de CPU (por defecto 2)
 EOF
 }
 
-validate_disk() {
-    local input="$1"
-    local real
-    real="$(readlink -f "$input" 2>/dev/null || true)"
+########################################
+# Parseo de opciones
+########################################
+parse_args() {
+    local args=()
 
-    if [[ -z "$real" || ! -f "$real" ]]; then
-        echo "ERROR: No existe el disco: $input"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user-pass)
+                USER_PASS="$2"
+                shift 2
+                ;;
+            --enable-root)
+                ENABLE_ROOT=true
+                shift
+                ;;
+            --virt-viewer)
+                ENABLE_GRAPHICS=true
+                shift
+                ;;
+            --extra-disks)
+                EXTRA_DISKS=true
+                shift
+                ;;
+            -h|--help)
+                print_help
+                exit 0
+                ;;
+            --)
+                shift
+                args+=("$@")
+                break
+                ;;
+            -*)
+                echo "ERROR: opción desconocida '$1'"
+                exit 1
+                ;;
+            *)
+                args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    # Mínimo 4 argumentos obligatorios
+    if (( ${#args[@]} < 4 )); then
+        echo "ERROR: faltan parámetros obligatorios."
+        print_help
         exit 1
     fi
 
-    local silo_real
-    silo_real="$(readlink -f "$SILO_DIR")"
+    VM_NAME="${args[0]}"
+    DISK_ARG="${args[1]}"
+    HOSTNAME="${args[2]}"
+    NET_NAME="${args[3]}"
 
-    case "$real" in
-        "$silo_real"/*) ;;
+    # IP opcional
+    if (( ${#args[@]} >= 5 )); then
+        IP="${args[4]}"
+    fi
+
+    # RAM opcional
+    if (( ${#args[@]} >= 6 )); then
+        RAM_MB="${args[5]}"
+    fi
+
+    # CPUs opcional
+    if (( ${#args[@]} >= 7 )); then
+        VCPUS="${args[6]}"
+    fi
+}
+
+########################################
+# Validaciones generales
+########################################
+validate_environment() {
+
+    # Silo existente
+    if [[ ! -d "$SILO_DIR" ]]; then
+        echo "ERROR: no existe el silo en: $SILO_DIR"
+        exit 1
+    fi
+
+    # Clave pública existente
+    if [[ ! -f "$PUBKEY_PATH" ]]; then
+        echo "ERROR: no existe la clave pública en $PUBKEY_PATH"
+        echo "Genera una con: ssh-keygen"
+        exit 1
+    fi
+
+    # Disco en silo
+    if [[ "$DISK_ARG" = /* ]]; then
+        DISK_PATH="$DISK_ARG"
+    else
+        DISK_PATH="$SILO_DIR/$DISK_ARG"
+    fi
+
+    if [[ ! -f "$DISK_PATH" ]]; then
+        echo "ERROR: el disco no existe: $DISK_PATH"
+        exit 1
+    fi
+
+    case "$DISK_PATH" in
+        "$SILO_DIR"/*) ;;
         *)
-            echo "ERROR: El disco debe estar dentro de: $silo_real"
-            echo "Ruta detectada: $real"
+            echo "ERROR: el disco debe estar dentro del silo: $SILO_DIR"
             exit 1
             ;;
     esac
 
-    if ! qemu-img info "$real" | grep -q "file format: qcow2"; then
-        echo "ERROR: El disco no es qcow2."
+    # Formato qcow2
+    if ! qemu-img info "$DISK_PATH" | grep -q "file format: qcow2"; then
+        echo "ERROR: el disco no es qcow2: $DISK_PATH"
         exit 1
     fi
 
-    if ! qemu-img info "$real" | grep -q "backing file: .*debian12.qcow2"; then
-        echo "ERROR: El disco NO es copia COW de debian12.qcow2."
+    # Red existente
+    if ! virsh net-info "$NET_NAME" &>/dev/null; then
+        echo "ERROR: la red '$NET_NAME' no existe."
         exit 1
     fi
 
-    DISCO="$real"
+    ########################################
+    # VALIDACIÓN LÓGICA: virt-viewer requiere contraseña
+    ########################################
+    if $ENABLE_GRAPHICS; then
+        if [[ -z "$USER_PASS" && $ENABLE_ROOT = false ]]; then
+            echo "ERROR: Para usar --virt-viewer debes habilitar acceso por consola."
+            echo "Debes usar al menos una de estas opciones:"
+            echo "  --user-pass PASSWORD"
+            echo "  --enable-root"
+            exit 1
+        fi
+    fi
 }
 
-validate_network() {
-    if ! virsh net-info "$1" >/dev/null 2>&1; then
-        echo "ERROR: La red '$1' no existe."
-        exit 1
-    fi
-}
-
-load_public_key() {
-    local key="$HOME/.ssh/id_rsa.pub"
-    if [[ ! -f "$key" ]]; then
-        echo "ERROR: No se encontró $key"
-        echo "Genera una clave con:"
-        echo "  ssh-keygen"
-        exit 1
-    fi
-    PUBKEY="$(cat "$key")"
-}
-
+########################################
+# Generación de ficheros cloud-init
+########################################
 generate_cloudinit_files() {
     local vm="$1"
     local host="$2"
@@ -112,39 +205,64 @@ generate_cloudinit_files() {
     USER_DATA="$WORKDIR/cip-user.yaml"
     META_DATA="$WORKDIR/cip-meta.yaml"
 
+    # meta-data
     cat > "$META_DATA" <<EOF
 instance-id: ${vm}
 local-hostname: ${host}
 EOF
 
-cat > "$USER_DATA" <<EOF
-#cloud-config
-users:
-  - name: administrador
-    groups: [sudo]
-    shell: /bin/bash
-    sudo: ['ALL=(ALL) NOPASSWD:ALL']
-    ssh-authorized-keys:
-      - $PUBKEY
-EOF
+    # Esto almacenará cambios de contraseña
+    local chpass_list=""
+    local ssh_pwauth=false
 
     if [[ -n "$USER_PASS" ]]; then
-cat >> "$USER_DATA" <<EOF
-
-ssh_pwauth: true
-chpasswd:
-  list: |
-    administrador:${USER_PASS}
-  expire: false
-EOF
+        chpass_list+="administrador:${USER_PASS}"$'\n'
+        ssh_pwauth=true
     fi
 
+    if $ENABLE_ROOT; then
+        chpass_list+="root:s1st3mas"$'\n'
+    fi
+
+    # user-data
+    {
+        echo "#cloud-config"
+        echo "users:"
+        echo "  - name: administrador"
+        echo "    groups: [sudo]"
+        echo "    shell: /bin/bash"
+        echo "    sudo: ['ALL=(ALL) NOPASSWD:ALL']"
+        echo "    ssh-authorized-keys:"
+        echo "      - $(cat "$PUBKEY_PATH")"
+
+        if [[ -n "$chpass_list" ]]; then
+            if $ssh_pwauth; then
+                echo "ssh_pwauth: true"
+            fi
+            echo "chpasswd:"
+            echo "  list: |"
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && echo "    $line"
+            done <<< "$chpass_list"
+            echo "  expire: false"
+        fi
+
+        echo "package_update: true"
+        echo "packages:"
+        echo "  - qemu-guest-agent"
+
+        echo "runcmd:"
+        echo "  - timedatectl set-timezone Europe/Madrid"
+        echo "  - systemctl start qemu-guest-agent"
+    } > "$USER_DATA"
+
+    # IP estática
     if [[ -n "$IP" ]]; then
         NETWORK_DATA="$WORKDIR/cip-net.yaml"
         local gw
         gw="$(echo "$IP" | awk -F. '{print $1"."$2"."$3".1"}')"
 
-cat > "$NETWORK_DATA" <<EOF
+        cat > "$NETWORK_DATA" <<EOF
 version: 2
 ethernets:
   enp1s0:
@@ -161,153 +279,130 @@ EOF
     fi
 }
 
-create_vm_cloudinit() {
-    echo "→ Creando VM…"
-    if [[ -n "$NETWORK_DATA" ]]; then
-        virt-install --name "$NOMBRE_VM" \
-            --ram "$RAM" --vcpus "$VCPUS" \
-            --import \
-            --disk path="$DISCO" \
-            --os-variant=debian12 \
-            --network network="$RED" \
-            --cloud-init user-data="$USER_DATA",meta-data="$META_DATA",network-config="$NETWORK_DATA" \
-            --graphics none \
-            --noautoconsole
-    else
-        virt-install --name "$NOMBRE_VM" \
-            --ram "$RAM" --vcpus "$VCPUS" \
-            --import \
-            --disk path="$DISCO" \
-            --os-variant=debian12 \
-            --network network="$RED" \
-            --cloud-init user-data="$USER_DATA",meta-data="$META_DATA" \
-            --graphics none \
-            --noautoconsole
-    fi
-}
+########################################
+# Adjuntar discos extra vdb..vdg
+########################################
+attach_extra_disks() {
+    local dominio="$1"
+    local maquina="${dominio#*-}"
 
-wait_cloudinit_boot() {
-    echo "→ Esperando a que cloud-init termine el primer arranque (45s)…"
-    sleep 45
-}
+    echo "Añadiendo discos extra al dominio: $dominio"
+    echo "Prefijo: $maquina"
+    echo "Silo: $SILO_DIR"
+    echo
 
-shutdown_vm() {
-    echo "→ Solicitando apagado de la VM…"
-    virsh shutdown "$NOMBRE_VM" >/dev/null 2>&1 || true
+    for unidad in vdb vdc vdd vde vdf vdg; do
+        local nombre_img="${maquina}-${unidad}.qcow2"
+        local ruta_img="${SILO_DIR}/${nombre_img}"
 
-    # Espera hasta 60 segundos
-    for i in {1..60}; do
-        state="$(virsh domstate "$NOMBRE_VM" 2>/dev/null || true)"
-        if [[ "$state" == "shut off" ]]; then
-            echo "→ VM apagada correctamente."
-            return
-        fi
-        sleep 1
+        echo "→ Creando: $ruta_img"
+        qemu-img create "$ruta_img" -f qcow2 40G
+
+        echo "→ Adjuntando como $unidad"
+        virsh attach-disk "$dominio" "$ruta_img" "$unidad" \
+            --driver qemu --subdriver qcow2 --targetbus virtio \
+            --persistent --live
+        echo "Disk attached successfully"
+        echo
     done
 
-    echo "⚠ Timeout: la VM no respondió a ACPI."
-    echo "→ Forzando apagado inmediato (destroy)…"
-    virsh destroy "$NOMBRE_VM" >/dev/null 2>&1 || true
+    echo "✔ Discos extra añadidos correctamente."
+    echo
 }
 
-apply_root_password() {
-    echo "→ Estableciendo contraseña de root con virt-customize…"
-    virt-customize -a "$DISCO" --root-password password:s1st3mas
-}
-
-start_vm() {
-    echo "→ Iniciando VM…"
-    virsh start "$NOMBRE_VM" >/dev/null
-}
-
-summary() {
+########################################
+# Resumen final
+########################################
+print_summary() {
     echo "-------------------------------------------"
-    echo "VM            : $NOMBRE_VM"
-    echo "Disco         : $DISCO"
-    echo "Hostname      : $HOSTNAME"
-    echo "Red           : $RED"
-    echo "IP            : ${IP:-DHCP}"
-    echo "RAM           : $RAM MB"
-    echo "vCPUs         : $VCPUS"
+    echo "VM (dominio) : $VM_NAME"
+    echo "Disco        : $DISK_PATH"
+    echo "Hostname     : $HOSTNAME"
+    echo "Red          : $NET_NAME"
+    echo "IP           : ${IP:-(DHCP)}"
+    echo "RAM          : ${RAM_MB} MB"
+    echo "vCPUs        : ${VCPUS}"
+
+    if $ENABLE_GRAPHICS; then
+        echo "Virt-viewer  : habilitado"
+    else
+        echo "Virt-viewer  : deshabilitado"
+    fi
+
+    if $EXTRA_DISKS; then
+        echo "Discos extra : SÍ"
+    else
+        echo "Discos extra : NO"
+    fi
 
     echo
     echo "Usuario 'administrador':"
-    echo "  - Clave pública obligatoria"
+    echo "  - Clave pública: $PUBKEY_PATH"
     if [[ -n "$USER_PASS" ]]; then
         echo "  - Contraseña activada: $USER_PASS"
     else
-        echo "  - SIN contraseña"
+        echo "  - Contraseña activada: NO"
     fi
-
     echo
+
+    echo "Root:"
     if $ENABLE_ROOT; then
-        echo "Root:"
         echo "  - Habilitado SOLO consola"
         echo "  - Contraseña: s1st3mas"
     else
-        echo "Root:"
-        echo "  - No habilitado"
+        echo "  - Deshabilitado"
     fi
+
+    if $EXTRA_DISKS; then
+        echo
+        echo "Discos extra:"
+        echo "  - Se han creado y adjuntado vdb..vdg en $SILO_DIR"
+        echo "  - Puedes verlos con:"
+        echo "      virsh domblklist '$VM_NAME'"
+    fi
+
     echo "-------------------------------------------"
 }
 
-#############################################
-# PARSEO DE OPCIONES
-#############################################
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --enable-root)
-            ENABLE_ROOT=true; shift ;;
-        --user-pass)
-            USER_PASS="$2"; shift 2 ;;
-        -h|--help)
-            print_help; exit 0 ;;
-        --)
-            shift; break ;;
-        -*)
-            echo "ERROR: Opción desconocida: $1"; exit 1 ;;
-        *)
-            break ;;
-    esac
-done
-
-#############################################
-# ARGUMENTOS POSICIONALES
-#############################################
-
-if [[ $# -lt 4 || $# -gt 7 ]]; then
-    echo "ERROR: Número incorrecto de parámetros"
-    echo "Use --help para más info"
-    exit 1
-fi
-
-NOMBRE_VM="$1"
-DISCO_INPUT="$2"
-HOSTNAME="$3"
-RED="$4"
-IP="${5:-}"
-RAM="${6:-2048}"
-VCPUS="${7:-2}"
-
-#############################################
+########################################
 # MAIN
-#############################################
+########################################
+parse_args "$@"
+validate_environment
+generate_cloudinit_files "$VM_NAME" "$HOSTNAME"
 
-validate_disk "$DISCO_INPUT"
-validate_network "$RED"
-load_public_key
-generate_cloudinit_files "$NOMBRE_VM" "$HOSTNAME"
+########################################
+# Creación de la VM
+########################################
+echo "→ Creando VM '$VM_NAME' con cloud-init…"
 
-create_vm_cloudinit
-wait_cloudinit_boot
+virt-install \
+  --name "$VM_NAME" \
+  --ram "$RAM_MB" \
+  --vcpus "$VCPUS" \
+  --import \
+  --disk "path=$DISK_PATH,format=qcow2" \
+  --os-variant debian12 \
+  --network "network=$NET_NAME" \
+  --cloud-init "user-data=$USER_DATA,meta-data=$META_DATA${NETWORK_DATA:+,network-config=$NETWORK_DATA}" \
+  $( $ENABLE_GRAPHICS && echo "--graphics spice" || echo "--graphics none" ) \
+  --noautoconsole
 
-if $ENABLE_ROOT; then
-    shutdown_vm
-    apply_root_password
-    start_vm
-else
-    echo "→ Root NO habilitado: no se apaga la VM."
+########################################
+# Añadir discos extra si procede
+########################################
+if $EXTRA_DISKS; then
+    attach_extra_disks "$VM_NAME"
 fi
 
-summary
+########################################
+# Esperar al arranque de la máquina
+########################################
+echo "-------------------------------------------"
+echo "Esperando arranque de la máquina (40s)…"
+sleep 40
+
+########################################
+# Resumen final
+########################################
+print_summary
