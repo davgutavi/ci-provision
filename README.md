@@ -150,28 +150,42 @@ Ejecutar desde el silo:
 
 ---
 
-## 📌 Ejemplos
+# 📘 Notas importantes sobre los ejemplos
 
-Todos deben ejecutarse **desde el silo**:
+- **usuario** = tu usuario en el servidor de la asignatura  
+- **Alumno2025** = contraseña de ejemplo  
+- **192.168.XXX.Y** → el `XXX` y el `Y` dependen de tu red virtual  
+- **soserver** = tu servidor: `avantasia`, `warcry` o `megadeth`
 
-### 1. VM con DHCP
+---
+
+# 5. 🧪 Casos de uso típicos
+
+## 🟦 **1️⃣ SERVER1 del Boletín 1**
+
+### **Caso base** 
+(DHCP, sin root, sin contraseña, sin virt-viewer)
+
 ```bash
 ./ci-provision.sh usuario-server1 server1.qcow2 server1 usuario-red
 ```
 
-### 2. VM con IP estática
+### **Caso base con root**
 ```bash
-./ci-provision.sh usuario-server2 server2.qcow2 server2 usuario-red 192.168.2.20
+./ci-provision.sh --enable-root \
+    usuario-server1 server1.qcow2 server1 usuario-red
 ```
 
-### 3. Contraseña para administrador
+### **Caso base con root + virt-viewer**
 ```bash
-./ci-provision.sh --user-pass 1234 usuario-server3 server3.qcow2 server3 usuario-red
+./ci-provision.sh --enable-root --virt-viewer \
+    usuario-server1 server1.qcow2 server1 usuario-red
 ```
 
-### 4. Root habilitado SOLO por consola
+### **Caso base con contraseña de usuario + virt-viewer**
 ```bash
-./ci-provision.sh --enable-root usuario-server4 server4.qcow2 server4 usuario-red
+./ci-provision.sh --user-pass Alumno2025 --virt-viewer \
+    usuario-server1 server1.qcow2 server1 usuario-red
 ```
 
 ---
