@@ -33,7 +33,7 @@ curl -L https://raw.githubusercontent.com/davgutavi/ci-provision/main/ci-provisi
 
 ### **2. Añade permisos de ejecución**
 ```bash
-chmod +x ci-provision.sh
+chmod u+x ci-provision.sh
 ```
 
 ### **3. Comprueba que funciona**
@@ -50,8 +50,13 @@ Configura automáticamente:
 
 - el usuario **administrador** con tu clave pública SSH,
 - la red (IP estática o DHCP),
-- la memoria y los vCPUs,
-- y opcionalmente **root solo por consola** (para prácticas de rescate).
+- la memoria y las vCPUs,
+
+Opcionalmente se puede configurar:
+- una contraseña para el usuario **administrador**.
+- la habilitación del usuario **root** para su acceso **solo por consola** (para prácticas de rescate).
+- el acceso a la máquina virtual a través de **virt-viewer**.
+- la conexión de **cinco discos extra**.
 
 ---
 
@@ -66,7 +71,7 @@ $HOME/imagenesMV/
 ### **2. Tener una red virtual creada**
 Comprueba las redes disponibles:
 ```bash
-virsh net-list
+virsh net-list 
 ```
 
 ### **3. Tener en el silo la imagen cloud de Debian 12**
@@ -90,18 +95,13 @@ curl -L https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-
      -o $HOME/imagenesMV/debian12.qcow2
 ```
 
-### **4. Tener creado el disco de la nueva máquina virtual en el silo**
-Debe ser una copia COW de la imagen cloud:
+### **4. Tener creado el disco de la nueva máquina virtual ubicado en el silo ($HOME/imagenesMV/)**
+Debe ser una copia COW de la imagen cloud.
+
+Por ejemplo:
 
 ```bash
-qemu-img create -f qcow2 \
-  -b debian12.qcow2 -F qcow2 \
-  server1.qcow2 40G
-```
-
-El disco **debe estar ubicado en**:
-```
-$HOME/imagenesMV/
+qemu-img create -f qcow2  -b debian12.qcow2 -F qcow2 server1.qcow2 40G
 ```
 
 ---
