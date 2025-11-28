@@ -6,6 +6,24 @@ set -euo pipefail
 ########################################
 SILO_DIR="$HOME/imagenesMV"
 PUBKEY_PATH="$HOME/.ssh/id_rsa.pub"
+BASE_IMG="$SILO_DIR/debian12.qcow2"
+
+########################################
+# Sistema de errores
+# Códigos:
+# 10–19: mínimos / argumentos
+# 20–29: dominio
+# 30–39: disco / silo / backing
+# 40–49: red / IP
+# 50–59: opciones (virt-viewer, etc.)
+# 60–69: discos extra
+########################################
+error() {
+    local code="$1"
+    shift
+    echo "ERROR [$code] $*" >&2
+    exit "$code"
+}
 
 ########################################
 # Variables de opciones (por defecto)
@@ -56,7 +74,7 @@ EOF
 }
 
 ########################################
-# Parseo de opciones
+# Parseo de opciones y parámetros
 ########################################
 parse_args() {
     local args=()
@@ -64,7 +82,10 @@ parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --user-pass)
-                USER_PASS="$2"
+                USER_PASS="${2-}"
+                if [[ -z "$USER_PASS" ]]; then
+                    error 10 "La opción --user-pass requiere un argumento (la contraseña)."
+                fi
                 shift 2
                 ;;
             --enable-root)
@@ -89,8 +110,7 @@ parse_args() {
                 break
                 ;;
             -*)
-                echo "ERROR: opción desconocida '$1'"
-                exit 1
+                error 10 "Opción desconocida '$1'. Usa -h para ver la ayuda."
                 ;;
             *)
                 args+=("$1")
@@ -99,11 +119,9 @@ parse_args() {
         esac
     done
 
-    # Mínimo 4 argumentos obligatorios
+    # 10 – Mínimo de parámetros obligatorios
     if (( ${#args[@]} < 4 )); then
-        echo "ERROR: faltan parámetros obligatorios."
-        print_help
-        exit 1
+        error 10 "Faltan parámetros obligatorios. Uso: $0 [opciones] NOMBRE_VM DISCO HOSTNAME RED [IP] [RAM_MB] [VCPUS]"
     fi
 
     VM_NAME="${args[0]}"
@@ -125,6 +143,16 @@ parse_args() {
     if (( ${#args[@]} >= 7 )); then
         VCPUS="${args[6]}"
     fi
+
+    # 11 – Clave pública obligatoria
+    if [[ ! -f "$PUBKEY_PATH" ]]; then
+        error 11 "No existe la clave pública en $PUBKEY_PATH. Genera una con: ssh-keygen"
+    fi
+
+    # 12 – Validación básica del disco (.qcow2)
+    if [[ "$DISK_ARG" != *.qcow2 ]]; then
+        error 12 "El parámetro DISCO ('$DISK_ARG') no termina en .qcow2. Revisa el orden de los parámetros."
+    fi
 }
 
 ########################################
@@ -132,62 +160,151 @@ parse_args() {
 ########################################
 validate_environment() {
 
-    # Silo existente
+    ########################################
+    # 2. Dominio
+    ########################################
+
+    # 20 – Formato de dominio: usuario-nombre
+    if ! [[ "$VM_NAME" =~ ^[^-]+-[^-]+$ ]]; then
+        error 20 "El nombre de dominio '$VM_NAME' no es válido. Debe ser usuario-nombre (exactamente un '-')."
+    fi
+
+    # 21 – Dominio ya existente
+    if virsh dominfo "$VM_NAME" &>/dev/null; then
+        error 21 "Ya existe un dominio llamado '$VM_NAME' en libvirt."
+    fi
+
+    ########################################
+    # 3. Disco
+    ########################################
+
+    # 30 – Silo existente
     if [[ ! -d "$SILO_DIR" ]]; then
-        echo "ERROR: no existe el silo en: $SILO_DIR"
-        exit 1
+        error 30 "No existe el silo en: $SILO_DIR"
     fi
 
-    # Clave pública existente
-    if [[ ! -f "$PUBKEY_PATH" ]]; then
-        echo "ERROR: no existe la clave pública en $PUBKEY_PATH"
-        echo "Genera una con: ssh-keygen"
-        exit 1
-    fi
-
-    # Disco en silo
+    # Resolver ruta del disco
     if [[ "$DISK_ARG" = /* ]]; then
         DISK_PATH="$DISK_ARG"
     else
         DISK_PATH="$SILO_DIR/$DISK_ARG"
     fi
 
+    # 31 – El disco debe existir
     if [[ ! -f "$DISK_PATH" ]]; then
-        echo "ERROR: el disco no existe: $DISK_PATH"
-        exit 1
+        error 31 "El disco no existe: $DISK_PATH"
     fi
 
+    # 32 – El disco debe estar dentro del silo
     case "$DISK_PATH" in
         "$SILO_DIR"/*) ;;
         *)
-            echo "ERROR: el disco debe estar dentro del silo: $SILO_DIR"
-            exit 1
+            error 32 "El disco debe estar dentro del silo: $SILO_DIR"
             ;;
     esac
 
-    # Formato qcow2
-    if ! qemu-img info "$DISK_PATH" | grep -q "file format: qcow2"; then
-        echo "ERROR: el disco no es qcow2: $DISK_PATH"
-        exit 1
+    # Ejecutar qemu-img info y guardar salida
+    local QEMU_LOG="/tmp/ci-provision-qemu-img.log"
+    if ! qemu-img info "$DISK_PATH" &>"$QEMU_LOG"; then
+        error 33 "No se ha podido ejecutar 'qemu-img info' sobre $DISK_PATH"
     fi
 
-    # Red existente
+    # 33 – Comprobar formato qcow2
+    if ! grep -q "file format: qcow2" "$QEMU_LOG"; then
+        error 33 "El disco $DISK_PATH no es qcow2."
+    fi
+
+    # Extraer backing file y formato
+    local BACKING_FILE BACKING_FMT
+    BACKING_FILE=$(grep -E 'backing file:' "$QEMU_LOG" | sed 's/.*: //') || true
+    BACKING_FMT=$(grep -E 'backing file format:' "$QEMU_LOG" | sed 's/.*: //') || true
+
+    # 34 – Debe ser COW de otra qcow2 (backing file + formato)
+    if [[ -z "$BACKING_FILE" || -z "$BACKING_FMT" ]]; then
+        error 34 "El disco $DISK_PATH no parece ser una copia COW (no tiene backing file válido)."
+    fi
+
+    if [[ "$BACKING_FMT" != "qcow2" ]]; then
+        error 34 "El disco $DISK_PATH no es COW de otra imagen qcow2 (backing file format != qcow2)."
+    fi
+
+    # 35 – Backing debe ser debian12.qcow2
+    if [[ "$(basename "$BACKING_FILE")" != "$(basename "$BASE_IMG")" ]]; then
+        error 35 "El disco $DISK_PATH no está haciendo COW sobre debian12.qcow2 (backing actual: $BACKING_FILE)."
+    fi
+
+    # 36 – Disco reutilizado (tamaño 'grande' >100MB)
+    local DISK_SIZE_BYTES THRESHOLD
+    DISK_SIZE_BYTES=$(stat -c '%s' "$DISK_PATH")
+    THRESHOLD=$((100 * 1024 * 1024)) # 100MB
+    if (( DISK_SIZE_BYTES > THRESHOLD )); then
+        error 36 "El disco $DISK_PATH ya tiene más de 100MB de datos. Probablemente ya ha sido usado en otra VM. Crea un disco nuevo COW."
+    fi
+
+    ########################################
+    # 4. Red
+    ########################################
+
+    # 40 – Red existente
     if ! virsh net-info "$NET_NAME" &>/dev/null; then
-        echo "ERROR: la red '$NET_NAME' no existe."
-        exit 1
+        error 40 "La red '$NET_NAME' no existe."
+    fi
+
+    # Validación de IP estática si se ha proporcionado
+    if [[ -n "$IP" ]]; then
+        local NET_XML NET_ADDR NET_MASK NET_PREFIX IP_PREFIX IP_LAST
+        NET_XML=$(virsh net-dumpxml "$NET_NAME" 2>/dev/null || true)
+        NET_ADDR=$(grep -E "<ip address=" <<< "$NET_XML" | sed -E "s/.*address='([^']+)'.*/\1/") || true
+        NET_MASK=$(grep -E "<ip address=" <<< "$NET_XML" | sed -E "s/.*netmask='([^']+)'.*/\1/") || true
+
+        if [[ -z "$NET_ADDR" || -z "$NET_MASK" ]]; then
+            error 41 "No se ha podido obtener la IP/netmask de la red '$NET_NAME' para validar la IP estática $IP."
+        fi
+
+        NET_PREFIX=${NET_ADDR%.*}   # 192.168.XXX
+        IP_PREFIX=${IP%.*}
+        IP_LAST=${IP##*.}
+
+        # 41 – IP debe pertenecer al prefijo de la red /24
+        if [[ "$NET_MASK" == "255.255.255.0" && "$NET_PREFIX" != "$IP_PREFIX" ]]; then
+            error 41 "La IP $IP no pertenece al rango de la red $NET_NAME (${NET_PREFIX}.0/24)."
+        fi
+
+        # 42 – IP no debe estar en el rango DHCP (128–254)
+        if [[ "$IP_LAST" =~ ^[0-9]+$ ]]; then
+            if (( IP_LAST >= 128 && IP_LAST <= 254 )); then
+                error 42 "La IP $IP está dentro del rango DHCP (128–254). Elige una IP fija fuera de ese rango."
+            fi
+        else
+            error 41 "La IP estática $IP no tiene un último octeto numérico válido."
+        fi
     fi
 
     ########################################
-    # VALIDACIÓN LÓGICA: virt-viewer requiere contraseña
+    # 5. Opciones generales
     ########################################
+
+    # 50 – virt-viewer requiere user-pass o root
     if $ENABLE_GRAPHICS; then
         if [[ -z "$USER_PASS" && $ENABLE_ROOT = false ]]; then
-            echo "ERROR: Para usar --virt-viewer debes habilitar acceso por consola."
-            echo "Debes usar al menos una de estas opciones:"
-            echo "  --user-pass PASSWORD"
-            echo "  --enable-root"
-            exit 1
+            error 50 "Para usar --virt-viewer debes habilitar acceso con --user-pass o --enable-root."
         fi
+    fi
+
+    ########################################
+    # 6. Discos extra
+    ########################################
+    if $EXTRA_DISKS; then
+        local maquina="${VM_NAME#*-}"
+
+        for unidad in vdb vdc vdd vde vdf vdg; do
+            local nombre_img="${maquina}-${unidad}.qcow2"
+            local ruta_img="${SILO_DIR}/${nombre_img}"
+
+            if [[ -e "$ruta_img" ]]; then
+                error 60 "El disco extra $ruta_img ya existe. No se crearán discos extra para evitar sobrescribir datos."
+            fi
+        done
     fi
 }
 
@@ -287,8 +404,8 @@ attach_extra_disks() {
     local maquina="${dominio#*-}"
 
     echo "Añadiendo discos extra al dominio: $dominio"
-    echo "Prefijo: $maquina"
-    echo "Silo: $SILO_DIR"
+    echo "Prefijo de las imágenes (parte derecha del dominio): $maquina"
+    echo "Las imágenes se crearán en: $SILO_DIR"
     echo
 
     for unidad in vdb vdc vdd vde vdf vdg; do
@@ -298,7 +415,7 @@ attach_extra_disks() {
         echo "→ Creando: $ruta_img"
         qemu-img create "$ruta_img" -f qcow2 40G
 
-        echo "→ Adjuntando como $unidad"
+        echo "→ Adjuntando $ruta_img como $unidad"
         virsh attach-disk "$dominio" "$ruta_img" "$unidad" \
             --driver qemu --subdriver qcow2 --targetbus virtio \
             --persistent --live
@@ -306,7 +423,7 @@ attach_extra_disks() {
         echo
     done
 
-    echo "✔ Discos extra añadidos correctamente."
+    echo "✔ Discos extra añadidos correctamente al dominio '$dominio'."
     echo
 }
 
