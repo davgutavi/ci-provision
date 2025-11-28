@@ -24,7 +24,7 @@ echo >> "$OUT"
 
 # Script principal, sin shebang, sin 'set -euo pipefail' y sin 'source ...'
 grep -vE '^#!/bin/bash|^set -euo pipefail|^source ' \
-    "$ROOT_DIR/src/ci-provision-main.sh" >> "$OUT"
+    "$ROOT_DIR/src/main.sh" >> "$OUT"
 
 chmod +x "$OUT"
 

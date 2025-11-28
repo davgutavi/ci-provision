@@ -13,8 +13,13 @@ BASE_IMG="$SILO_DIR/debian12.qcow2"
 # también el mensaje de error 36 para que siga siendo coherente.
 DISK_REUSE_MAX_KIB=1024
 
-# Espera al arranque para qemu-guest-agent
-SLEEP_SECS=40
+# Tiempos de espera por defecto (en segundos)
+SLEEP_NO_GLUSTER=50      # sin --glusterfs
+SLEEP_WITH_GLUSTER=80    # con --glusterfs
+SLEEP_SECS="$SLEEP_NO_GLUSTER"
+
+# Permite saltarse la espera final
+NO_WAIT=false
 
 ########################################
 # Variables de opciones (por defecto)
@@ -71,6 +76,7 @@ Opciones:
   --virt-viewer        Habilita gráficos para virt-viewer
   --extra-disks        Crea y adjunta discos extra vdb..vdg en el silo
   --glusterfs          Prepara la VM como nodo GlusterFS (glusterfs-server + enable glusterd + reset de machine-id)
+  --no-wait            No esperar tras crear la VM (omite la pausa final)
   -h, --help           Muestra esta ayuda
 
 Parámetros:
@@ -111,6 +117,10 @@ parse_args() {
                 ;;
             --glusterfs)
                 GLUSTERFS=true
+                shift
+                ;;
+            --no-wait)
+                NO_WAIT=true
                 shift
                 ;;
             -h|--help)
@@ -256,8 +266,24 @@ main() {
     fi
 
     echo "-------------------------------------------"
-    echo "Esperando arranque de la máquina (${SLEEP_SECS}s)…"
-    sleep "$SLEEP_SECS"
+
+    # Ajustar tiempo de espera según opciones
+    if $NO_WAIT; then
+        SLEEP_SECS=0
+    else
+        if $GLUSTERFS; then
+            SLEEP_SECS="$SLEEP_WITH_GLUSTER"
+        else
+            SLEEP_SECS="$SLEEP_NO_GLUSTER"
+        fi
+    fi
+
+    if (( SLEEP_SECS > 0 )); then
+        echo "Esperando arranque de la máquina (${SLEEP_SECS}s)…"
+        sleep "$SLEEP_SECS"
+    else
+        echo "Omitiendo espera final (--no-wait activo)."
+    fi
 
     print_summary
 }
