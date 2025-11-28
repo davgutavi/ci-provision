@@ -1,4 +1,3 @@
-
 ########################################
 # Generación de ficheros cloud-init
 ########################################
@@ -61,13 +60,18 @@ EOF
             echo "  - glusterfs-server"
         fi
 
+        # glusterd: habilitar en bootcmd, pero NO arrancarlo
+        if $GLUSTERFS; then
+            echo "bootcmd:"
+            echo "  - systemctl enable glusterd || true"
+        fi
+
         echo "runcmd:"
         echo "  - timedatectl set-timezone Europe/Madrid"
         echo "  - systemctl start qemu-guest-agent"
 
         if $GLUSTERFS; then
-            # Solo habilitamos glusterd, no lo arrancamos
-            echo "  - systemctl enable glusterd || true"
+            # Reset del machine-id para poder clonar la imagen base
             echo "  - truncate -s 0 /etc/machine-id"
         fi
     } > "$USER_DATA"
