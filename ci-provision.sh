@@ -143,6 +143,23 @@ parse_args() {
 }
 
 ########################################
+# Pre-check de discos extra
+########################################
+precheck_extra_disks() {
+    local dominio="$1"
+    local maquina="${dominio#*-}"
+
+    for unidad in vdb vdc vdd vde vdf vdg; do
+        local nombre_img="${maquina}-${unidad}.qcow2"
+        local ruta_img="${SILO_DIR}/${nombre_img}"
+
+        if [[ -f "$ruta_img" ]]; then
+            error 60 "El disco extra '$ruta_img' ya existe. Elimínalo o usa otro nombre de dominio."
+        fi
+    done
+}
+
+########################################
 # Validaciones generales
 ########################################
 validate_environment() {
@@ -214,6 +231,7 @@ validate_environment() {
     fi
 
     local BACKING_FILE_LINE BACKING_FMT_LINE BACKING_FILE BACKING_FMT
+
     BACKING_FILE_LINE=$(grep -E '^backing file:' "$QEMU_LOG" || true)
     BACKING_FMT_LINE=$(grep -E '^backing file format:' "$QEMU_LOG" || true)
 
@@ -228,7 +246,8 @@ validate_environment() {
     fi
 
     if [[ -n "$BACKING_FMT_LINE" ]]; then
-        BACKING_FMT=${BACKING_FMT_LINE#*: }
+        # "backing file format: qcow2" → campo 4 = qcow2
+        BACKING_FMT=$(echo "$BACKING_FMT_LINE" | awk '{print $4}' | tr -d '[:space:]')
     else
         BACKING_FMT=""
     fi
@@ -245,15 +264,6 @@ validate_environment() {
     # 35 – Backing debe ser debian12.qcow2 (por nombre)
     if [[ "$(basename "$BACKING_FILE")" != "$(basename "$BASE_IMG")" ]]; then
         error 35 "El disco $DISK_PATH no está haciendo COW sobre debian12.qcow2 (backing actual: $BACKING_FILE)."
-    fi
-
-    ########################################
-    # 3.6 Disco reutilizado (tamaño > 100MB)
-    ########################################
-    local DISK_BYTES
-    DISK_BYTES=$(grep -E '^disk size:' "$QEMU_LOG" | sed -n 's/.*(\([0-9]\+\) bytes).*/\1/p' || echo 0)
-    if [[ -n "$DISK_BYTES" && "$DISK_BYTES" -gt $((100 * 1024 * 1024)) ]]; then
-        error 36 "El disco $DISK_PATH ya tiene más de 100MB de datos. Probablemente está reutilizado de una provisión anterior."
     fi
 
     ########################################
@@ -322,6 +332,13 @@ validate_environment() {
   --user-pass PASSWORD
   --enable-root"
         fi
+    fi
+
+    ########################################
+    # 5.2 Pre-check de discos extra
+    ########################################
+    if $EXTRA_DISKS; then
+        precheck_extra_disks "$VM_NAME"
     fi
 }
 
@@ -428,11 +445,6 @@ attach_extra_disks() {
     for unidad in vdb vdc vdd vde vdf vdg; do
         local nombre_img="${maquina}-${unidad}.qcow2"
         local ruta_img="${SILO_DIR}/${nombre_img}"
-
-        # 5.2 Comprobar que no existe previamente
-        if [[ -f "$ruta_img" ]]; then
-            error 60 "El disco extra '$ruta_img' ya existe. Elimínalo o usa otro nombre de dominio."
-        fi
 
         echo "→ Creando: $ruta_img"
         qemu-img create "$ruta_img" -f qcow2 40G
