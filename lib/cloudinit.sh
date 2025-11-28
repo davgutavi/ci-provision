@@ -12,13 +12,17 @@ generate_cloudinit_files() {
     USER_DATA="$WORKDIR/cip-user.yaml"
     META_DATA="$WORKDIR/cip-meta.yaml"
 
+    ########################################
     # meta-data
+    ########################################
     cat > "$META_DATA" <<EOF
 instance-id: ${vm}
 local-hostname: ${host}
 EOF
 
+    ########################################
     # Construcción de lista de contraseñas
+    ########################################
     local chpass_list=""
     local ssh_pwauth=false
 
@@ -31,6 +35,9 @@ EOF
         chpass_list+="root:s1st3mas"$'\n'
     fi
 
+    ########################################
+    # user-data
+    ########################################
     {
         echo "#cloud-config"
         echo "users:"
@@ -60,23 +67,21 @@ EOF
             echo "  - glusterfs-server"
         fi
 
-        # glusterd: habilitar en bootcmd, pero NO arrancarlo
-        if $GLUSTERFS; then
-            echo "bootcmd:"
-            echo "  - systemctl enable glusterd || true"
-        fi
-
         echo "runcmd:"
         echo "  - timedatectl set-timezone Europe/Madrid"
         echo "  - systemctl start qemu-guest-agent"
 
         if $GLUSTERFS; then
-            # Reset del machine-id para poder clonar la imagen base
+            # Solo habilitamos glusterd (no se arranca, solo enable)
+            echo "  - systemctl enable glusterd"
+            # Reset de machine-id para poder clonar sin conflictos
             echo "  - truncate -s 0 /etc/machine-id"
         fi
     } > "$USER_DATA"
 
-    # IP estática
+    ########################################
+    # network-config (solo si IP estática)
+    ########################################
     if [[ -n "$IP" ]]; then
         NETWORK_DATA="$WORKDIR/cip-net.yaml"
         local gw
