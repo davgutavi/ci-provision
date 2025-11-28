@@ -9,6 +9,10 @@ PUBKEY_PATH="$HOME/.ssh/id_rsa.pub"
 BASE_IMG="$SILO_DIR/debian12.qcow2"
 QEMU_LOG="/tmp/ci-provision-qemu-img.log"
 
+# Umbral para considerar que un disco ya ha sido usado (en MiB)
+# Si el "disk size" de qemu-img info supera este valor, se considera reutilizado.
+MAX_NEW_DISK_SIZE_MIB=1
+
 ########################################
 # Variables de opciones (por defecto)
 ########################################
@@ -213,7 +217,7 @@ validate_environment() {
     esac
 
     ########################################
-    # 3.4 Formato qcow2
+    # 3.4 Formato qcow2 + volcado de info
     ########################################
     if ! qemu-img info "$DISK_PATH" &>"$QEMU_LOG"; then
         error 33 "No se ha podido ejecutar 'qemu-img info' sobre $DISK_PATH"
@@ -264,6 +268,61 @@ validate_environment() {
     # 35 – Backing debe ser debian12.qcow2 (por nombre)
     if [[ "$(basename "$BACKING_FILE")" != "$(basename "$BASE_IMG")" ]]; then
         error 35 "El disco $DISK_PATH no está haciendo COW sobre debian12.qcow2 (backing actual: $BACKING_FILE)."
+    fi
+
+    ########################################
+    # 3.6 Disco reutilizado (disk size > MAX_NEW_DISK_SIZE_MIB)
+    ########################################
+    local DISK_SIZE_LINE DISK_SIZE_VAL DISK_SIZE_UNIT DISK_SIZE_INT
+    DISK_SIZE_LINE=$(grep -E '^disk size:' "$QEMU_LOG" || true)
+
+    if [[ -n "$DISK_SIZE_LINE" ]]; then
+        # Ejemplos:
+        # disk size: 196 KiB
+        # disk size: 22.6 MiB
+        DISK_SIZE_VAL=$(echo "$DISK_SIZE_LINE" | awk '{print $3}')
+        DISK_SIZE_UNIT=$(echo "$DISK_SIZE_LINE" | awk '{print $4}')
+        DISK_SIZE_INT=${DISK_SIZE_VAL%.*}  # parte entera (22.6 → 22, 196 → 196, 0.5 → 0)
+
+        local threshold_kib threshold_bytes
+        threshold_kib=$((MAX_NEW_DISK_SIZE_MIB * 1024))
+        threshold_bytes=$((MAX_NEW_DISK_SIZE_MIB * 1024 * 1024))
+
+        case "$DISK_SIZE_UNIT" in
+            bytes)
+                if (( DISK_SIZE_INT > threshold_bytes )); then
+                    error 36 "El disco $DISK_PATH parece reutilizado: su 'disk size' es mayor de ${MAX_NEW_DISK_SIZE_MIB} MiB.
+Valor reportado por qemu-img info:
+  $DISK_SIZE_LINE"
+                fi
+                ;;
+            KiB)
+                if (( DISK_SIZE_INT > threshold_kib )); then
+                    error 36 "El disco $DISK_PATH parece reutilizado: su 'disk size' es mayor de ${MAX_NEW_DISK_SIZE_MIB} MiB.
+Valor reportado por qemu-img info:
+  $DISK_SIZE_LINE"
+                fi
+                ;;
+            MiB)
+                if (( DISK_SIZE_INT >= MAX_NEW_DISK_SIZE_MIB )); then
+                    error 36 "El disco $DISK_PATH parece reutilizado: su 'disk size' es mayor o igual que ${MAX_NEW_DISK_SIZE_MIB} MiB.
+Valor reportado por qemu-img info:
+  $DISK_SIZE_LINE"
+                fi
+                ;;
+            GiB|TiB)
+                # Cualquier GiB/TiB ya supera de sobra el umbral
+                if (( DISK_SIZE_INT >= 0 )); then
+                    error 36 "El disco $DISK_PATH parece reutilizado: su 'disk size' es muy grande (>= 1 GiB).
+Valor reportado por qemu-img info:
+  $DISK_SIZE_LINE"
+                fi
+                ;;
+            *)
+                # Unidad desconocida: no hacemos nada, pero podrías añadir un aviso si quisieras
+                :
+                ;;
+        esac
     fi
 
     ########################################
