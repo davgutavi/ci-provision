@@ -7,11 +7,12 @@ set -euo pipefail
 SILO_DIR="$HOME/imagenesMV"
 PUBKEY_PATH="$HOME/.ssh/id_rsa.pub"
 BASE_IMG="$SILO_DIR/debian12.qcow2"
-QEMU_LOG="/tmp/ci-provision-qemu-img.log"
 
-# Umbral para considerar que un disco ya ha sido usado (en MiB)
-# Si el "disk size" de qemu-img info supera este valor, se considera reutilizado.
-MAX_NEW_DISK_SIZE_MIB=1
+# Umbral para considerar que un disco ya ha sido usado (en KiB)
+DISK_REUSE_MAX_KIB=1024
+
+# Espera al arranque para qemu-guest-agent
+SLEEP_SECS=40
 
 ########################################
 # Variables de opciones (por defecto)
@@ -20,6 +21,7 @@ USER_PASS=""
 ENABLE_ROOT=false
 ENABLE_GRAPHICS=false
 EXTRA_DISKS=false
+GLUSTERFS=false
 
 VM_NAME=""
 DISK_ARG=""
@@ -36,7 +38,7 @@ META_DATA=""
 NETWORK_DATA=""
 
 ########################################
-# Función de error con códigos
+# Función de error con código
 ########################################
 error() {
     local code="$1"
@@ -46,7 +48,7 @@ error() {
 }
 
 ########################################
-# Ayuda
+# Función de ayuda
 ########################################
 print_help() {
     cat <<EOF
@@ -58,6 +60,7 @@ Opciones:
   --enable-root        Habilita root SOLO por consola (contraseña: s1st3mas)
   --virt-viewer        Habilita gráficos para virt-viewer
   --extra-disks        Crea y adjunta discos extra vdb..vdg en el silo
+  --glusterfs          Prepara la VM como nodo GlusterFS (glusterfs-server + glusterd + reset de machine-id)
   -h, --help           Muestra esta ayuda
 
 Parámetros:
@@ -72,7 +75,7 @@ EOF
 }
 
 ########################################
-# Parseo de opciones y parámetros
+# Parseo de opciones
 ########################################
 parse_args() {
     local args=()
@@ -96,6 +99,10 @@ parse_args() {
                 EXTRA_DISKS=true
                 shift
                 ;;
+            --glusterfs)
+                GLUSTERFS=true
+                shift
+                ;;
             -h|--help)
                 print_help
                 exit 0
@@ -106,7 +113,7 @@ parse_args() {
                 break
                 ;;
             -*)
-                error 11 "Opción desconocida '$1'"
+                error 12 "Opción desconocida '$1'"
                 ;;
             *)
                 args+=("$1")
@@ -115,7 +122,7 @@ parse_args() {
         esac
     done
 
-    # 10 – Mínimos obligatorios
+    # Mínimo 4 argumentos obligatorios
     if (( ${#args[@]} < 4 )); then
         error 10 "Faltan parámetros obligatorios."
     fi
@@ -124,11 +131,6 @@ parse_args() {
     DISK_ARG="${args[1]}"
     HOSTNAME="${args[2]}"
     NET_NAME="${args[3]}"
-
-    # DISK debe parecer .qcow2 (check básico de orden)
-    if [[ "$DISK_ARG" != *.qcow2 ]]; then
-        error 12 "El parámetro DISCO ('$DISK_ARG') no termina en .qcow2. Revisa el orden de los argumentos."
-    fi
 
     # IP opcional
     if (( ${#args[@]} >= 5 )); then
@@ -144,23 +146,16 @@ parse_args() {
     if (( ${#args[@]} >= 7 )); then
         VCPUS="${args[6]}"
     fi
-}
 
-########################################
-# Pre-check de discos extra
-########################################
-precheck_extra_disks() {
-    local dominio="$1"
-    local maquina="${dominio#*-}"
+    # Comprobación de formato del nombre de dominio: usuario-maquina
+    if ! [[ "$VM_NAME" =~ ^[^-]+-[^-]+$ ]]; then
+        error 20 "El nombre del dominio '$VM_NAME' no es válido. Formato requerido: usuario-nombremv (p.ej., alu345-server1)."
+    fi
 
-    for unidad in vdb vdc vdd vde vdf vdg; do
-        local nombre_img="${maquina}-${unidad}.qcow2"
-        local ruta_img="${SILO_DIR}/${nombre_img}"
-
-        if [[ -f "$ruta_img" ]]; then
-            error 60 "El disco extra '$ruta_img' ya existe. Elimínalo o usa otro nombre de dominio."
-        fi
-    done
+    # Comprobar que no exista ya un dominio con ese nombre
+    if virsh dominfo "$VM_NAME" &>/dev/null; then
+        error 21 "El dominio '$VM_NAME' ya existe en libvirt. Usa otro nombre o elimina el dominio actual."
+    fi
 }
 
 ########################################
@@ -168,37 +163,17 @@ precheck_extra_disks() {
 ########################################
 validate_environment() {
 
-    ########################################
-    # 2.1 Formato del dominio
-    ########################################
-    if ! [[ "$VM_NAME" =~ ^[^-]+-[^-]+$ ]]; then
-        error 20 "El nombre de dominio '$VM_NAME' no es válido. Formato esperado: usuario-nombre_maquina (p.ej. alu345-server1)."
-    fi
-
-    ########################################
-    # 2.2 Dominio ya existente
-    ########################################
-    if virsh list --all | awk '{print $2}' | grep -qx "$VM_NAME"; then
-        error 21 "Ya existe un dominio llamado '$VM_NAME' en libvirt."
-    fi
-
-    ########################################
-    # 3.1 Silo existente
-    ########################################
+    # Silo existente
     if [[ ! -d "$SILO_DIR" ]]; then
         error 30 "No existe el silo en: $SILO_DIR"
     fi
 
-    ########################################
-    # 4.1 Clave pública existente
-    ########################################
+    # Clave pública existente
     if [[ ! -f "$PUBKEY_PATH" ]]; then
-        error 70 "No existe la clave pública en $PUBKEY_PATH. Genera una con: ssh-keygen"
+        error 31 "No existe la clave pública en $PUBKEY_PATH. Genera una con: ssh-keygen"
     fi
 
-    ########################################
-    # 3.3 Disco en silo y existencia
-    ########################################
+    # Disco en silo (resolver ruta)
     if [[ "$DISK_ARG" = /* ]]; then
         DISK_PATH="$DISK_ARG"
     else
@@ -206,198 +181,139 @@ validate_environment() {
     fi
 
     if [[ ! -f "$DISK_PATH" ]]; then
-        error 31 "El disco no existe: $DISK_PATH"
+        error 32 "El disco no existe: $DISK_PATH"
     fi
 
     case "$DISK_PATH" in
         "$SILO_DIR"/*) ;;
         *)
-            error 32 "El disco debe estar dentro del silo: $SILO_DIR"
+            error 33 "El disco debe estar dentro del silo: $SILO_DIR"
             ;;
     esac
 
-    ########################################
-    # 3.4 Formato qcow2 + volcado de info
-    ########################################
-    if ! qemu-img info "$DISK_PATH" &>"$QEMU_LOG"; then
-        error 33 "No se ha podido ejecutar 'qemu-img info' sobre $DISK_PATH"
+    # Comprobar qcow2, backing file y disco reutilizado
+    local TMP_LOG
+    TMP_LOG="$(mktemp /tmp/ci-provision-qemu-img.XXXXXX)"
+
+    if ! qemu-img info "$DISK_PATH" &>"$TMP_LOG"; then
+        rm -f "$TMP_LOG"
+        error 34 "No se ha podido obtener información con 'qemu-img info' sobre $DISK_PATH"
     fi
 
-    if ! grep -q "^file format: qcow2" "$QEMU_LOG"; then
-        error 33 "El disco $DISK_PATH no es qcow2."
+    # Formato de fichero
+    local FILE_FMT
+    FILE_FMT="$(grep -E '^file format:' "$TMP_LOG" | awk '{print $3}')"
+    if [[ "$FILE_FMT" != "qcow2" ]]; then
+        rm -f "$TMP_LOG"
+        error 34 "El disco $DISK_PATH no es qcow2 (file format: $FILE_FMT)."
     fi
 
-    ########################################
-    # 3.5 Copia COW sobre debian12.qcow2
-    ########################################
-    if [[ ! -f "$BASE_IMG" ]]; then
-        error 37 "No se encuentra la imagen base '$BASE_IMG'. Debe existir debian12.qcow2 en el silo."
+    # Backing file y formato
+    local BACKING_LINE BACKING_FMT BACKING_NAME
+    BACKING_LINE="$(grep -E '^backing file:' "$TMP_LOG" || true)"
+
+    if [[ -z "$BACKING_LINE" ]]; then
+        rm -f "$TMP_LOG"
+        error 34 "El disco $DISK_PATH no parece ser una copia COW (no tiene 'backing file')."
     fi
 
-    local BACKING_FILE_LINE BACKING_FMT_LINE BACKING_FILE BACKING_FMT
-
-    BACKING_FILE_LINE=$(grep -E '^backing file:' "$QEMU_LOG" || true)
-    BACKING_FMT_LINE=$(grep -E '^backing file format:' "$QEMU_LOG" || true)
-
-    if [[ -n "$BACKING_FILE_LINE" ]]; then
-        # Ejemplos:
-        # backing file: debian12.qcow2
-        # backing file: debian12.qcow2 (actual path: imagenesMV/debian12.qcow2)
-        BACKING_FILE=${BACKING_FILE_LINE#*: }   # quita "backing file: "
-        BACKING_FILE=${BACKING_FILE%% (*}      # quita " (actual path: ...)" si existe
-    else
-        BACKING_FILE=""
-    fi
-
-    if [[ -n "$BACKING_FMT_LINE" ]]; then
-        # "backing file format: qcow2" → campo 4 = qcow2
-        BACKING_FMT=$(echo "$BACKING_FMT_LINE" | awk '{print $4}' | tr -d '[:space:]')
-    else
-        BACKING_FMT=""
-    fi
-
-    # 34 – Debe ser COW de otra qcow2
-    if [[ -z "$BACKING_FILE" || -z "$BACKING_FMT" ]]; then
-        error 34 "El disco $DISK_PATH no parece ser una copia COW (no tiene backing file válido)."
-    fi
-
+    BACKING_FMT="$(grep -E '^backing file format:' "$TMP_LOG" | awk '{print $4}')"
     if [[ "$BACKING_FMT" != "qcow2" ]]; then
-        error 34 "El disco $DISK_PATH no es COW de otra imagen qcow2 (backing file format != qcow2)."
+        rm -f "$TMP_LOG"
+        error 34 "El disco $DISK_PATH no parece una copia COW de otra imagen qcow2 (backing file format: $BACKING_FMT)."
     fi
 
-    # 35 – Backing debe ser debian12.qcow2 (por nombre)
-    if [[ "$(basename "$BACKING_FILE")" != "$(basename "$BASE_IMG")" ]]; then
-        error 35 "El disco $DISK_PATH no está haciendo COW sobre debian12.qcow2 (backing actual: $BACKING_FILE)."
+    # Extractar solo el nombre base del backing file, sin "(actual path: ...)"
+    BACKING_NAME="$(echo "$BACKING_LINE" | sed 's/^backing file: //; s/ (actual path: .*//')"
+
+    if [[ "$BACKING_NAME" != "$(basename "$BASE_IMG")" ]]; then
+        rm -f "$TMP_LOG"
+        error 35 "El disco $DISK_PATH no está haciendo COW sobre $(basename "$BASE_IMG").
+Backing actual: $BACKING_NAME
+Esperado: $(basename "$BASE_IMG")
+
+Vuelve a crear el disco con:
+  qemu-img create -f qcow2 -b debian12.qcow2 -F qcow2 NOMBRE.qcow2 40G"
     fi
 
-    ########################################
-    # 3.6 Disco reutilizado (disk size > MAX_NEW_DISK_SIZE_MIB)
-    ########################################
-    local DISK_SIZE_LINE DISK_SIZE_VAL DISK_SIZE_UNIT DISK_SIZE_INT
-    DISK_SIZE_LINE=$(grep -E '^disk size:' "$QEMU_LOG" || true)
+    # Comprobación de disco reutilizado (disk size)
+    local DISK_SIZE_LINE SIZE_NUM SIZE_UNIT SIZE_KIB
+    DISK_SIZE_LINE="$(grep -E '^disk size:' "$TMP_LOG" | sed 's/\r//')"
+    SIZE_NUM="$(echo "$DISK_SIZE_LINE" | awk '{print $3}')"
+    SIZE_UNIT="$(echo "$DISK_SIZE_LINE" | awk '{print $4}')"
 
-    if [[ -n "$DISK_SIZE_LINE" ]]; then
-        # Ejemplos:
-        # disk size: 196 KiB
-        # disk size: 22.6 MiB
-        DISK_SIZE_VAL=$(echo "$DISK_SIZE_LINE" | awk '{print $3}')
-        DISK_SIZE_UNIT=$(echo "$DISK_SIZE_LINE" | awk '{print $4}')
-        DISK_SIZE_INT=${DISK_SIZE_VAL%.*}  # parte entera (22.6 → 22, 196 → 196, 0.5 → 0)
+    SIZE_KIB=0
+    case "$SIZE_UNIT" in
+        KiB)
+            SIZE_KIB="${SIZE_NUM%.*}"
+            ;;
+        MiB)
+            # num * 1024
+            SIZE_KIB=$(printf "%.0f" "$(echo "$SIZE_NUM * 1024" | bc -l)")
+            ;;
+        GiB)
+            SIZE_KIB=$(printf "%.0f" "$(echo "$SIZE_NUM * 1024 * 1024" | bc -l)")
+            ;;
+        *)
+            # Si no reconocemos la unidad, no forzamos fallo por esto
+            SIZE_KIB=0
+            ;;
+    esac
 
-        local threshold_kib threshold_bytes
-        threshold_kib=$((MAX_NEW_DISK_SIZE_MIB * 1024))
-        threshold_bytes=$((MAX_NEW_DISK_SIZE_MIB * 1024 * 1024))
+    if (( SIZE_KIB > DISK_REUSE_MAX_KIB )); then
+        rm -f "$TMP_LOG"
+        error 36 "El disco $DISK_PATH parece reutilizado: su 'disk size' es mayor de 1 MiB.
+Línea de 'disk size' actual:
+  $DISK_SIZE_LINE
 
-        case "$DISK_SIZE_UNIT" in
-            bytes)
-                if (( DISK_SIZE_INT > threshold_bytes )); then
-                    error 36 "El disco $DISK_PATH parece reutilizado: su 'disk size' es mayor de ${MAX_NEW_DISK_SIZE_MIB} MiB.
-Valor reportado por qemu-img info:
-  $DISK_SIZE_LINE"
-                fi
-                ;;
-            KiB)
-                if (( DISK_SIZE_INT > threshold_kib )); then
-                    error 36 "El disco $DISK_PATH parece reutilizado: su 'disk size' es mayor de ${MAX_NEW_DISK_SIZE_MIB} MiB.
-Valor reportado por qemu-img info:
-  $DISK_SIZE_LINE"
-                fi
-                ;;
-            MiB)
-                if (( DISK_SIZE_INT >= MAX_NEW_DISK_SIZE_MIB )); then
-                    error 36 "El disco $DISK_PATH parece reutilizado: su 'disk size' es mayor o igual que ${MAX_NEW_DISK_SIZE_MIB} MiB.
-Valor reportado por qemu-img info:
-  $DISK_SIZE_LINE"
-                fi
-                ;;
-            GiB|TiB)
-                # Cualquier GiB/TiB ya supera de sobra el umbral
-                if (( DISK_SIZE_INT >= 0 )); then
-                    error 36 "El disco $DISK_PATH parece reutilizado: su 'disk size' es muy grande (>= 1 GiB).
-Valor reportado por qemu-img info:
-  $DISK_SIZE_LINE"
-                fi
-                ;;
-            *)
-                # Unidad desconocida: no hacemos nada, pero podrías añadir un aviso si quisieras
-                :
-                ;;
-        esac
+Crea un disco nuevo con:
+  qemu-img create -f qcow2 -b debian12.qcow2 -F qcow2 NOMBRE.qcow2 40G"
     fi
 
-    ########################################
-    # 4.1 Red existente
-    ########################################
+    rm -f "$TMP_LOG"
+
+    # Red existente
     if ! virsh net-info "$NET_NAME" &>/dev/null; then
         error 40 "La red '$NET_NAME' no existe."
     fi
 
-    ########################################
-    # 4.2 Validación de IP estática (si se proporciona)
-    ########################################
+    # Validación básica de IP y rango DHCP si se especifica IP estática
     if [[ -n "$IP" ]]; then
-        # IP debe tener formato 4 octetos
-        if ! [[ "$IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-            error 41 "La IP '$IP' no tiene un formato IPv4 válido."
+        # Debe ser 192.168.X.Y
+        if ! [[ "$IP" =~ ^192\.168\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            error 41 "La IP '$IP' no es válida. Debe ser del tipo 192.168.XXX.YYY."
         fi
 
-        # Obtener dirección y rango DHCP de la red
-        local NET_XML NET_ADDR NET_MASK DHCP_START DHCP_END
-        NET_XML=$(virsh net-dumpxml "$NET_NAME")
+        local OCT3 OCT4
+        OCT3="$(echo "$IP" | awk -F. '{print $3}')"
+        OCT4="$(echo "$IP" | awk -F. '{print $4}')"
 
-        NET_ADDR=$(echo "$NET_XML" | awk -F"'" '/<ip address=/{print $2; exit}')
-        NET_MASK=$(echo "$NET_XML" | awk -F"'" '/<ip address=/{print $4; exit}')
-        DHCP_START=$(echo "$NET_XML" | awk -F"'" '/<range start=/{print $2; exit}')
-        DHCP_END=$(echo "$NET_XML" | awk -F"'" '/<range start=/{print $4; exit}')
-
-        # Asumimos /24 (255.255.255.0) como en la asignatura
-        if [[ "$NET_MASK" != "255.255.255.0" ]]; then
-            echo "AVISO: La máscara de la red $NET_NAME no es 255.255.255.0. Las validaciones de IP pueden no ser exactas." >&2
-        fi
-
-        # Red del alumno = primeros 3 octetos de NET_ADDR
-        local NET_PREFIX IP_PREFIX
-        NET_PREFIX=$(echo "$NET_ADDR" | awk -F. '{print $1"."$2"."$3}')
-        IP_PREFIX=$(echo "$IP"       | awk -F. '{print $1"."$2"."$3}')
-
-        if [[ "$NET_PREFIX" != "$IP_PREFIX" ]]; then
-            error 41 "La IP '$IP' no pertenece al rango de la red '$NET_NAME' (prefijo esperado: $NET_PREFIX.x)."
-        fi
-
-        # 4.3 IP no puede estar dentro del rango DHCP (asumimos 128–254 salvo que el XML diga otra cosa)
-        local IP_LAST OCT_DHCP_START OCT_DHCP_END
-        IP_LAST=$(echo "$IP" | awk -F. '{print $4}')
-
-        if [[ -n "$DHCP_START" && -n "$DHCP_END" ]]; then
-            OCT_DHCP_START=$(echo "$DHCP_START" | awk -F. '{print $4}')
-            OCT_DHCP_END=$(echo "$DHCP_END"     | awk -F. '{print $4}')
-        else
-            # Por defecto, como se ha configurado en la asignatura: 128–254
-            OCT_DHCP_START=128
-            OCT_DHCP_END=254
-        fi
-
-        if (( IP_LAST >= OCT_DHCP_START && IP_LAST <= OCT_DHCP_END )); then
-            error 42 "La IP '$IP' está dentro del rango DHCP ($OCT_DHCP_START–$OCT_DHCP_END) de la red '$NET_NAME'. Debes usar una IP fija fuera de ese rango."
+        # Rango DHCP configurado: 128–254 → no se permite en IP fija
+        if (( OCT4 >= 128 && OCT4 <= 254 )); then
+            error 42 "La IP '$IP' está en el rango DHCP (128–254). Usa una IP fija fuera de ese rango."
         fi
     fi
 
-    ########################################
-    # 5.1 virt-viewer requiere contraseña o root
-    ########################################
+    # VALIDACIÓN LÓGICA: virt-viewer requiere contraseña de admin o root habilitado
     if $ENABLE_GRAPHICS; then
         if [[ -z "$USER_PASS" && $ENABLE_ROOT = false ]]; then
-            error 50 "Para usar --virt-viewer debes habilitar un acceso interactivo. Usa al menos una de estas opciones:
+            error 50 "Para usar --virt-viewer debes habilitar acceso por consola.
+Usa al menos una de estas opciones:
   --user-pass PASSWORD
   --enable-root"
         fi
     fi
 
-    ########################################
-    # 5.2 Pre-check de discos extra
-    ########################################
+    # Pre-check de discos extra: si se van a crear, comprobar que no existan
     if $EXTRA_DISKS; then
-        precheck_extra_disks "$VM_NAME"
+        local maquina
+        maquina="${VM_NAME#*-}"
+        for unidad in vdb vdc vdd vde vdf vdg; do
+            local ruta_extra="${SILO_DIR}/${maquina}-${unidad}.qcow2"
+            if [[ -e "$ruta_extra" ]]; then
+                error 60 "El disco extra '$ruta_extra' ya existe. Elimínalo o usa otro nombre de dominio."
+            fi
+        done
     fi
 }
 
@@ -421,7 +337,7 @@ instance-id: ${vm}
 local-hostname: ${host}
 EOF
 
-    # Acumulador de contraseñas
+    # Construcción de lista de contraseñas
     local chpass_list=""
     local ssh_pwauth=false
 
@@ -434,7 +350,6 @@ EOF
         chpass_list+="root:s1st3mas"$'\n'
     fi
 
-    # user-data
     {
         echo "#cloud-config"
         echo "users:"
@@ -460,13 +375,20 @@ EOF
         echo "package_update: true"
         echo "packages:"
         echo "  - qemu-guest-agent"
+        if $GLUSTERFS; then
+            echo "  - glusterfs-server"
+        fi
 
         echo "runcmd:"
         echo "  - timedatectl set-timezone Europe/Madrid"
         echo "  - systemctl start qemu-guest-agent"
+        if $GLUSTERFS; then
+            echo "  - systemctl enable --now glusterd"
+            echo "  - truncate -s 0 /etc/machine-id"
+        fi
     } > "$USER_DATA"
 
-    # network-config sólo si hay IP fija
+    # IP estática
     if [[ -n "$IP" ]]; then
         NETWORK_DATA="$WORKDIR/cip-net.yaml"
         local gw
@@ -545,6 +467,12 @@ print_summary() {
         echo "Discos extra : NO"
     fi
 
+    if $GLUSTERFS; then
+        echo "GlusterFS    : activado (server + glusterd + reset de machine-id)"
+    else
+        echo "GlusterFS    : NO"
+    fi
+
     echo
     echo "Usuario 'administrador':"
     echo "  - Clave pública: $PUBKEY_PATH"
@@ -595,12 +523,13 @@ virt-install \
   $( $ENABLE_GRAPHICS && echo "--graphics spice" || echo "--graphics none" ) \
   --noautoconsole
 
+# Añadir discos extra si procede
 if $EXTRA_DISKS; then
     attach_extra_disks "$VM_NAME"
 fi
 
 echo "-------------------------------------------"
-echo "Esperando arranque de la máquina (40s)…"
-sleep 40
+echo "Esperando arranque de la máquina (${SLEEP_SECS}s)…"
+sleep "$SLEEP_SECS"
 
 print_summary
