@@ -60,7 +60,7 @@ Opciones:
   --enable-root        Habilita root SOLO por consola (contraseña: s1st3mas)
   --virt-viewer        Habilita gráficos para virt-viewer
   --extra-disks        Crea y adjunta discos extra vdb..vdg en el silo
-  --glusterfs          Prepara la VM como nodo GlusterFS (glusterfs-server + glusterd + reset de machine-id)
+  --glusterfs          Prepara la VM como nodo GlusterFS (glusterfs-server + enable glusterd + reset de machine-id)
   -h, --help           Muestra esta ayuda
 
 Parámetros:
@@ -223,7 +223,7 @@ validate_environment() {
         error 34 "El disco $DISK_PATH no parece una copia COW de otra imagen qcow2 (backing file format: $BACKING_FMT)."
     fi
 
-    # Extractar solo el nombre base del backing file, sin "(actual path: ...)"
+    # Extraer solo el nombre base del backing file, sin "(actual path: ...)"
     BACKING_NAME="$(echo "$BACKING_LINE" | sed 's/^backing file: //; s/ (actual path: .*//')"
 
     if [[ "$BACKING_NAME" != "$(basename "$BASE_IMG")" ]]; then
@@ -248,14 +248,12 @@ Vuelve a crear el disco con:
             SIZE_KIB="${SIZE_NUM%.*}"
             ;;
         MiB)
-            # num * 1024
             SIZE_KIB=$(printf "%.0f" "$(echo "$SIZE_NUM * 1024" | bc -l)")
             ;;
         GiB)
             SIZE_KIB=$(printf "%.0f" "$(echo "$SIZE_NUM * 1024 * 1024" | bc -l)")
             ;;
         *)
-            # Si no reconocemos la unidad, no forzamos fallo por esto
             SIZE_KIB=0
             ;;
     esac
@@ -279,7 +277,6 @@ Crea un disco nuevo con:
 
     # Validación básica de IP y rango DHCP si se especifica IP estática
     if [[ -n "$IP" ]]; then
-        # Debe ser 192.168.X.Y
         if ! [[ "$IP" =~ ^192\.168\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             error 41 "La IP '$IP' no es válida. Debe ser del tipo 192.168.XXX.YYY."
         fi
@@ -382,8 +379,11 @@ EOF
         echo "runcmd:"
         echo "  - timedatectl set-timezone Europe/Madrid"
         echo "  - systemctl start qemu-guest-agent"
+
         if $GLUSTERFS; then
-            echo "  - systemctl enable --now glusterd"
+            # Sólo habilitamos glusterd para arranque automático,
+            # sin arrancarlo en este primer boot.
+            echo "  - systemctl enable glusterd || true"
             echo "  - truncate -s 0 /etc/machine-id"
         fi
     } > "$USER_DATA"
@@ -468,7 +468,7 @@ print_summary() {
     fi
 
     if $GLUSTERFS; then
-        echo "GlusterFS    : activado (server + glusterd + reset de machine-id)"
+        echo "GlusterFS    : activado (server instalado + glusterd habilitado + machine-id reseteado)"
     else
         echo "GlusterFS    : NO"
     fi
