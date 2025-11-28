@@ -1,8 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-#!/bin/bash
-
 ########################################
 # Validaciones generales (entorno, disco, red, opciones)
 ########################################

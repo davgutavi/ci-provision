@@ -1,5 +1,3 @@
-#!/bin/bash
-
 ########################################
 # Validaciones generales (entorno, disco, red, opciones)
 ########################################
