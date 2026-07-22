@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+# Salidas de las herramientas en formato neutro, independiente del idioma
+# configurado en el servidor.
+export LC_ALL=C
+
 ########################################
 # Configuración general
 ########################################
@@ -8,10 +12,11 @@ SILO_DIR="$HOME/imagenesMV"
 PUBKEY_PATH="$HOME/.ssh/id_rsa.pub"
 BASE_IMG="$SILO_DIR/debian12.qcow2"
 
-# Umbral para considerar que un disco ya ha sido usado (en KiB)
-# 1024 KiB = 1 MiB. Si cambias este valor, revisa si quieres ajustar
-# también el mensaje de error 36 para que siga siendo coherente.
-DISK_REUSE_MAX_KIB=1024
+# Umbral para considerar que un disco ya ha sido usado (en bytes)
+# 1048576 bytes = 1 MiB. Un disco recién creado ocupa unos 200 KB.
+# Si cambias este valor, revisa si quieres ajustar también el mensaje de
+# error 36 para que siga siendo coherente.
+DISK_REUSE_MAX_BYTES=1048576
 
 # Tiempos de espera por defecto (en segundos)
 SLEEP_NO_GLUSTER=50      # sin --glusterfs
@@ -168,8 +173,13 @@ parse_args() {
     fi
 
     # Comprobación de formato del nombre de dominio: usuario-maquina
-    if ! [[ "$VM_NAME" =~ ^[^-]+-[^-]+$ ]]; then
-        error 20 "El nombre del dominio '$VM_NAME' no es válido. Formato requerido: usuario-nombremv (p.ej., alu345-server1)."
+    # Se admiten guiones adicionales en la parte de la máquina (p.ej.,
+    # alu345-gluster-base) pero no barras ni puntos, porque el nombre se usa
+    # para construir el directorio de trabajo de cloud-init.
+    if ! [[ "$VM_NAME" =~ ^[A-Za-z0-9_]+-[A-Za-z0-9_-]+$ ]]; then
+        error 20 "El nombre del dominio '$VM_NAME' no es válido.
+Formato requerido: usuario-nombremv (p.ej., alu345-server1).
+Solo se admiten letras, números, guiones bajos y guiones, con al menos un guión separador."
     fi
 
     # Comprobar que no exista ya un dominio con ese nombre

@@ -9,6 +9,10 @@ generate_cloudinit_files() {
     rm -rf "$WORKDIR"
     mkdir -p "$WORKDIR"
 
+    # Estos ficheros contienen contraseñas en texto plano y el servidor de la
+    # asignatura es multiusuario: solo su propietario debe poder leerlos.
+    chmod 700 "$WORKDIR"
+
     USER_DATA="$WORKDIR/cip-user.yaml"
     META_DATA="$WORKDIR/cip-meta.yaml"
 
@@ -79,26 +83,33 @@ EOF
         fi
     } > "$USER_DATA"
 
+    chmod 600 "$USER_DATA" "$META_DATA"
+
     ########################################
     # network-config (solo si IP estática)
     ########################################
+    # La pasarela y el prefijo se toman de la configuración real de la red
+    # (ver load_network_info), no de una suposición sobre la IP indicada.
+    # Se usa la forma 'routes:' en lugar de la obsoleta 'gateway4:' para que
+    # coincida con la plantilla que se enseña en el manual de laboratorio.
     if [[ -n "$IP" ]]; then
         NETWORK_DATA="$WORKDIR/cip-net.yaml"
-        local gw
-        gw="$(echo "$IP" | awk -F. '{print $1"."$2"."$3".1"}')"
 
         cat > "$NETWORK_DATA" <<EOF
 version: 2
 ethernets:
   enp1s0:
     addresses:
-      - ${IP}/24
-    gateway4: ${gw}
+      - ${IP}/${NET_PREFIX}
+    routes:
+      - to: default
+        via: ${NET_GATEWAY}
     nameservers:
       addresses:
         - 150.214.186.69
         - 150.214.130.15
 EOF
+        chmod 600 "$NETWORK_DATA"
     else
         NETWORK_DATA=""
     fi
