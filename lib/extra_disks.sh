@@ -16,6 +16,8 @@ attach_extra_disks() {
 
         echo "→ Creando: $ruta_img"
         qemu-img create "$ruta_img" -f qcow2 40G
+        # Se registra para poder borrarlo si la ejecución falla más adelante
+        DISCOS_CREADOS+=( "$ruta_img" )
 
         echo "→ Adjuntando como $unidad"
         virsh attach-disk "$dominio" "$ruta_img" "$unidad" \

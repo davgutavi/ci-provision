@@ -60,7 +60,14 @@ generate_cloudinit_files() {
     local vm="$1"
     local host="$2"
 
-    WORKDIR="./cloudinit-${vm}"
+    # En modo simulación se usa un directorio aparte, para no sobrescribir los
+    # ficheros de una máquina que ya exista.
+    if $DRY_RUN; then
+        WORKDIR="./cloudinit-${vm}.dry-run"
+    else
+        WORKDIR="./cloudinit-${vm}"
+    fi
+
     rm -rf "$WORKDIR"
     mkdir -p "$WORKDIR"
 

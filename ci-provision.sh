@@ -79,9 +79,18 @@ mask_to_prefix() {
     printf '%s' "$bits"
 }
 
-# Extrae el valor de un atributo XML de una línea (atributos entre comillas simples)
+# Extrae el valor de un atributo XML de una línea.
+# libvirt emite siempre comillas simples, pero se aceptan también las dobles
+# para no depender de ese detalle.
 xml_attr() {
-    printf '%s' "$1" | sed -n "s/.*[[:space:]]$2='\([^']*\)'.*/\1/p"
+    local valor
+    valor="$(sed -n "s/.*[[:space:]]$2='\([^']*\)'.*/\1/p" <<< "$1")"
+
+    if [[ -z "$valor" ]]; then
+        valor="$(sed -n "s/.*[[:space:]]$2=\"\([^\"]*\)\".*/\1/p" <<< "$1")"
+    fi
+
+    printf '%s' "$valor"
 }
 
 ########################################
@@ -439,7 +448,14 @@ generate_cloudinit_files() {
     local vm="$1"
     local host="$2"
 
-    WORKDIR="./cloudinit-${vm}"
+    # En modo simulación se usa un directorio aparte, para no sobrescribir los
+    # ficheros de una máquina que ya exista.
+    if $DRY_RUN; then
+        WORKDIR="./cloudinit-${vm}.dry-run"
+    else
+        WORKDIR="./cloudinit-${vm}"
+    fi
+
     rm -rf "$WORKDIR"
     mkdir -p "$WORKDIR"
 
@@ -575,6 +591,8 @@ attach_extra_disks() {
 
         echo "→ Creando: $ruta_img"
         qemu-img create "$ruta_img" -f qcow2 40G
+        # Se registra para poder borrarlo si la ejecución falla más adelante
+        DISCOS_CREADOS+=( "$ruta_img" )
 
         echo "→ Adjuntando como $unidad"
         virsh attach-disk "$dominio" "$ruta_img" "$unidad" \
@@ -696,6 +714,9 @@ GRACE_SECS=3             # margen tras la respuesta del agente
 # Permite saltarse la espera final
 NO_WAIT=false
 
+# Modo simulación: valida y genera ficheros, pero no crea nada
+DRY_RUN=false
+
 ########################################
 # Variables de opciones (por defecto)
 ########################################
@@ -722,6 +743,20 @@ USER_DATA=""
 META_DATA=""
 NETWORK_DATA=""
 
+# Comando virt-install, construido como array para poder ejecutarlo y también
+# mostrarlo tal cual en modo simulación
+VIRT_INSTALL_CMD=()
+
+########################################
+# Registro de lo creado, para poder deshacerlo si algo falla a medias
+########################################
+DOMINIO_CREADO=false
+DISCOS_CREADOS=()
+
+# Distingue una salida con código de error propio (validaciones) de un fallo
+# inesperado del script
+SALIDA_CONTROLADA=false
+
 ########################################
 # Carga de librerías
 ########################################
@@ -733,9 +768,60 @@ NETWORK_DATA=""
 error() {
     local code="$1"
     shift
+    SALIDA_CONTROLADA=true
     echo "ERROR [$code] $*" >&2
     exit "$code"
 }
+
+########################################
+# Deshacer lo creado si la ejecución se interrumpe a medias
+#
+# Solo se eliminan los elementos creados por ESTA ejecución. El disco
+# principal del alumno y cualquier fichero preexistente no se tocan nunca.
+########################################
+revertir_cambios() {
+    if ! $DOMINIO_CREADO && (( ${#DISCOS_CREADOS[@]} == 0 )); then
+        return 0
+    fi
+
+    echo >&2
+    echo "Deshaciendo lo que se había creado en esta ejecución:" >&2
+
+    if $DOMINIO_CREADO; then
+        virsh destroy  "$VM_NAME" >/dev/null 2>&1 || true
+        virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+        echo "  - dominio '$VM_NAME' eliminado" >&2
+    fi
+
+    local disco
+    for disco in ${DISCOS_CREADOS[@]+"${DISCOS_CREADOS[@]}"}; do
+        if rm -f "$disco"; then
+            echo "  - disco extra '$disco' eliminado" >&2
+        fi
+    done
+
+    if [[ -n "$DISK_PATH" ]]; then
+        echo "  (tu disco principal '$DISK_PATH' NO se ha tocado)" >&2
+    fi
+}
+
+al_salir() {
+    local code=$?
+
+    if (( code == 0 )); then
+        return 0
+    fi
+
+    if ! $SALIDA_CONTROLADA; then
+        echo >&2
+        echo "ERROR: el script ha terminado de forma inesperada (código $code)." >&2
+        echo "       Si el problema persiste, avisa a tu profesor indicando el comando usado." >&2
+    fi
+
+    revertir_cambios
+}
+
+trap al_salir EXIT
 
 ########################################
 # Función de ayuda
@@ -752,6 +838,7 @@ Opciones:
   --extra-disks        Crea y adjunta discos extra vdb..vdg en el silo
   --glusterfs          Prepara la VM como nodo GlusterFS (glusterfs-server + enable glusterd + reset de machine-id)
   --no-wait            No esperar tras crear la VM (omite la pausa final)
+  --dry-run            Comprueba los datos y muestra lo que se haría, SIN crear nada
   -h, --help           Muestra esta ayuda
 
 Parámetros:
@@ -798,6 +885,10 @@ parse_args() {
                 NO_WAIT=true
                 shift
                 ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
             -h|--help)
                 print_help
                 exit 0
@@ -842,6 +933,25 @@ parse_args() {
         VCPUS="${args[6]}"
     fi
 
+    # RAM y vCPUs deben ser números; si no, virt-install falla con un error
+    # críptico mucho más adelante
+    if ! [[ "$RAM_MB" =~ ^[0-9]+$ ]] || (( RAM_MB < 512 )); then
+        error 13 "La memoria RAM '$RAM_MB' no es válida. Debe ser un número de MB igual o mayor que 512 (por defecto 2048)."
+    fi
+
+    if ! [[ "$VCPUS" =~ ^[0-9]+$ ]] || (( VCPUS < 1 )); then
+        error 13 "El número de vCPUs '$VCPUS' no es válido. Debe ser un número igual o mayor que 1 (por defecto 2)."
+    fi
+
+    # La contraseña se teclea en la consola de la máquina virtual, cuyo teclado
+    # no tiene por qué corresponderse con el del alumno. El manual ya advierte
+    # de no usar tildes ni caracteres del alfabeto español.
+    if [[ -n "$USER_PASS" ]] && grep -q '[^ -~]' <<< "$USER_PASS"; then
+        error 14 "La contraseña contiene caracteres no ASCII (tildes, ñ, etc.).
+No podrías teclearla en la consola de la máquina virtual.
+Usa solo letras sin tilde, números y signos básicos."
+    fi
+
     # Comprobación de formato del nombre de dominio: usuario-maquina
     # Se admiten guiones adicionales en la parte de la máquina (p.ej.,
     # alu345-gluster-base) pero no barras ni puntos, porque el nombre se usa
@@ -856,6 +966,76 @@ Solo se admiten letras, números, guiones bajos y guiones, con al menos un guió
     if virsh dominfo "$VM_NAME" &>/dev/null; then
         error 21 "El dominio '$VM_NAME' ya existe en libvirt. Usa otro nombre o elimina el dominio actual."
     fi
+}
+
+########################################
+# Aviso de known_hosts
+#
+# El DHCP reutiliza direcciones, así que es muy habitual que la IP de una
+# máquina nueva ya figure en known_hosts con la clave de una máquina anterior.
+# El resultado es el aviso alarmante del apartado B.2 del manual. Aquí solo se
+# avisa y se da el comando: no se toca el known_hosts del usuario.
+########################################
+avisar_known_hosts() {
+    local ip="$1"
+    local kh="$HOME/.ssh/known_hosts"
+
+    if [[ -z "$ip" || ! -f "$kh" ]]; then
+        return 0
+    fi
+
+    if ssh-keygen -F "$ip" -f "$kh" >/dev/null 2>&1; then
+        echo
+        echo "AVISO: la IP $ip ya figura en tu known_hosts con la clave de otra máquina."
+        echo "       Al conectar por SSH verás un aviso de seguridad. Para resolverlo:"
+        echo "         ssh-keygen -f \"$kh\" -R \"$ip\""
+    fi
+}
+
+########################################
+# Construcción del comando virt-install
+########################################
+construir_comando() {
+    VIRT_INSTALL_CMD=(
+        virt-install
+        --name "$VM_NAME"
+        --ram "$RAM_MB"
+        --vcpus "$VCPUS"
+        --import
+        --disk "path=$DISK_PATH,format=qcow2"
+        --os-variant debian12
+        --network "network=$NET_NAME"
+        --cloud-init "user-data=$USER_DATA,meta-data=$META_DATA${NETWORK_DATA:+,network-config=$NETWORK_DATA}"
+    )
+
+    if $ENABLE_GRAPHICS; then
+        VIRT_INSTALL_CMD+=( --graphics spice )
+    else
+        VIRT_INSTALL_CMD+=( --graphics none )
+    fi
+
+    VIRT_INSTALL_CMD+=( --noautoconsole )
+}
+
+# Muestra el comando de forma legible, una opción por línea
+imprimir_comando() {
+    local i=1 n=${#VIRT_INSTALL_CMD[@]} arg siguiente
+
+    printf '  virt-install \\\n'
+    while (( i < n )); do
+        arg="${VIRT_INSTALL_CMD[$i]}"
+        siguiente="${VIRT_INSTALL_CMD[$(( i + 1 ))]:-}"
+
+        if [[ "$arg" == --* && -n "$siguiente" && "$siguiente" != --* ]]; then
+            printf '    %s %s' "$arg" "$siguiente"
+            i=$(( i + 2 ))
+        else
+            printf '    %s' "$arg"
+            i=$(( i + 1 ))
+        fi
+
+        if (( i < n )); then printf ' \\\n'; else printf '\n'; fi
+    done
 }
 
 ########################################
@@ -933,20 +1113,44 @@ main() {
     parse_args "$@"
     validate_environment
     generate_cloudinit_files "$VM_NAME" "$HOSTNAME"
+    construir_comando
+
+    ########################################
+    # Modo simulación: nada de lo de abajo se ejecuta
+    ########################################
+    if $DRY_RUN; then
+        echo "→ MODO SIMULACIÓN (--dry-run): no se creará ninguna máquina."
+        echo
+        echo "✔ Validaciones superadas."
+        echo "    Red '$NET_NAME': pasarela $NET_GATEWAY, prefijo /$NET_PREFIX"
+        if [[ -n "$IP" ]]; then
+            echo "    IP $IP disponible para asignación fija."
+        else
+            echo "    La máquina obtendría su IP por DHCP."
+        fi
+        echo
+        echo "✔ Ficheros cloud-init generados en $WORKDIR/"
+        echo
+        echo "Comando que se ejecutaría:"
+        echo
+        imprimir_comando
+        echo
+
+        if $EXTRA_DISKS; then
+            local maquina="${VM_NAME#*-}"
+            echo "Después se crearían y engancharían 6 discos extra de 40G en $SILO_DIR:"
+            echo "    ${maquina}-vdb.qcow2 … ${maquina}-vdg.qcow2"
+            echo
+        fi
+
+        echo "No se ha creado ni modificado ninguna máquina, disco ni red."
+        return 0
+    fi
 
     echo "→ Creando VM '$VM_NAME' con cloud-init…"
 
-    virt-install \
-      --name "$VM_NAME" \
-      --ram "$RAM_MB" \
-      --vcpus "$VCPUS" \
-      --import \
-      --disk "path=$DISK_PATH,format=qcow2" \
-      --os-variant debian12 \
-      --network "network=$NET_NAME" \
-      --cloud-init "user-data=$USER_DATA,meta-data=$META_DATA${NETWORK_DATA:+,network-config=$NETWORK_DATA}" \
-      $( $ENABLE_GRAPHICS && echo "--graphics spice" || echo "--graphics none" ) \
-      --noautoconsole
+    "${VIRT_INSTALL_CMD[@]}"
+    DOMINIO_CREADO=true
 
     # Añadir discos extra si procede
     if $EXTRA_DISKS; then
@@ -969,6 +1173,7 @@ main() {
     fi
 
     print_summary
+    avisar_known_hosts "${IP:-$VM_IP}"
 }
 
 main "$@"

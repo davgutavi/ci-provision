@@ -76,9 +76,18 @@ mask_to_prefix() {
     printf '%s' "$bits"
 }
 
-# Extrae el valor de un atributo XML de una línea (atributos entre comillas simples)
+# Extrae el valor de un atributo XML de una línea.
+# libvirt emite siempre comillas simples, pero se aceptan también las dobles
+# para no depender de ese detalle.
 xml_attr() {
-    printf '%s' "$1" | sed -n "s/.*[[:space:]]$2='\([^']*\)'.*/\1/p"
+    local valor
+    valor="$(sed -n "s/.*[[:space:]]$2='\([^']*\)'.*/\1/p" <<< "$1")"
+
+    if [[ -z "$valor" ]]; then
+        valor="$(sed -n "s/.*[[:space:]]$2=\"\([^\"]*\)\".*/\1/p" <<< "$1")"
+    fi
+
+    printf '%s' "$valor"
 }
 
 ########################################
