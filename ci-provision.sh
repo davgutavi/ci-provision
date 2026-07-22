@@ -99,9 +99,11 @@ load_network_info() {
 Consulta las redes disponibles con: virsh net-list --all"
     fi
 
-    # Bloque <ip> de IPv4 (se descartan los de IPv6)
+    # Bloque <ip> de IPv4 (se descartan los de IPv6).
+    # El 'head -n1' cierra la tubería en cuanto tiene su línea; sin el '|| true'
+    # el SIGPIPE de los grep haría fallar la tubería por 'pipefail'.
     local ipline
-    ipline="$(printf '%s\n' "$xml" | grep -E '<ip[[:space:]]' | grep -v "family='ipv6'" | head -n1)"
+    ipline="$( { printf '%s\n' "$xml" | grep -E '<ip[[:space:]]' | grep -v "family='ipv6'" | head -n1; } || true )"
     if [[ -z "$ipline" ]]; then
         error 43 "No se ha podido determinar la configuración IPv4 de la red '$NET_NAME'."
     fi
@@ -390,11 +392,16 @@ Usa al menos una de estas opciones:
 # Devuelve la unidad que tiene enganchada la ISO de cloud-init, mirando tanto
 # la definición activa como la persistente. Cadena vacía si no hay ninguna.
 cloudinit_unidad() {
-    local vm="$1"
-    {
-        virsh domblklist "$vm" 2>/dev/null
-        virsh domblklist "$vm" --inactive 2>/dev/null
-    } | awk '$2 ~ /cloudinit\.iso$/ { print $1; exit }'
+    local vm="$1" salida
+    # Se recoge primero la salida y luego se filtra con un here-string. Si se
+    # encadenara con una tubería, el 'exit' de awk cerraría el conducto antes
+    # de que terminase el segundo virsh, que moriría con SIGPIPE y, por
+    # 'pipefail', abortaría el script entero.
+    salida="$(
+        virsh domblklist "$vm" 2>/dev/null || true
+        virsh domblklist "$vm" --inactive 2>/dev/null || true
+    )"
+    awk '$2 ~ /cloudinit\.iso$/ { print $1; exit }' <<< "$salida"
 }
 
 eject_cloudinit_media() {
@@ -592,9 +599,11 @@ attach_extra_disks() {
 # Devuelve por stdout la primera IPv4 no local que reporte el guest agent.
 # Cadena vacía si el agente no responde todavía.
 obtener_ip_agente() {
-    local vm="$1"
-    virsh domifaddr "$vm" --source agent 2>/dev/null \
-        | awk '$3 == "ipv4" && $4 !~ /^127\./ { split($4, a, "/"); print a[1]; exit }'
+    local vm="$1" salida
+    # Ver la nota de cloudinit_unidad: nada de tuberías hacia un awk que hace
+    # 'exit', porque con 'pipefail' un SIGPIPE aguas arriba aborta el script.
+    salida="$(virsh domifaddr "$vm" --source agent 2>/dev/null || true)"
+    awk '$3 == "ipv4" && $4 !~ /^127\./ { split($4, a, "/"); print a[1]; exit }' <<< "$salida"
 }
 
 # ¿Está la máquina lista? Si se pidió IP fija, se exige esa IP concreta.

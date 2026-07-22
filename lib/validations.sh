@@ -96,9 +96,11 @@ load_network_info() {
 Consulta las redes disponibles con: virsh net-list --all"
     fi
 
-    # Bloque <ip> de IPv4 (se descartan los de IPv6)
+    # Bloque <ip> de IPv4 (se descartan los de IPv6).
+    # El 'head -n1' cierra la tubería en cuanto tiene su línea; sin el '|| true'
+    # el SIGPIPE de los grep haría fallar la tubería por 'pipefail'.
     local ipline
-    ipline="$(printf '%s\n' "$xml" | grep -E '<ip[[:space:]]' | grep -v "family='ipv6'" | head -n1)"
+    ipline="$( { printf '%s\n' "$xml" | grep -E '<ip[[:space:]]' | grep -v "family='ipv6'" | head -n1; } || true )"
     if [[ -z "$ipline" ]]; then
         error 43 "No se ha podido determinar la configuración IPv4 de la red '$NET_NAME'."
     fi

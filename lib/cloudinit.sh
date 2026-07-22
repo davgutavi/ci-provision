@@ -13,11 +13,16 @@
 # Devuelve la unidad que tiene enganchada la ISO de cloud-init, mirando tanto
 # la definición activa como la persistente. Cadena vacía si no hay ninguna.
 cloudinit_unidad() {
-    local vm="$1"
-    {
-        virsh domblklist "$vm" 2>/dev/null
-        virsh domblklist "$vm" --inactive 2>/dev/null
-    } | awk '$2 ~ /cloudinit\.iso$/ { print $1; exit }'
+    local vm="$1" salida
+    # Se recoge primero la salida y luego se filtra con un here-string. Si se
+    # encadenara con una tubería, el 'exit' de awk cerraría el conducto antes
+    # de que terminase el segundo virsh, que moriría con SIGPIPE y, por
+    # 'pipefail', abortaría el script entero.
+    salida="$(
+        virsh domblklist "$vm" 2>/dev/null || true
+        virsh domblklist "$vm" --inactive 2>/dev/null || true
+    )"
+    awk '$2 ~ /cloudinit\.iso$/ { print $1; exit }' <<< "$salida"
 }
 
 eject_cloudinit_media() {

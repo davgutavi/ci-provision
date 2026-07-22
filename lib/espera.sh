@@ -11,9 +11,11 @@
 # Devuelve por stdout la primera IPv4 no local que reporte el guest agent.
 # Cadena vacía si el agente no responde todavía.
 obtener_ip_agente() {
-    local vm="$1"
-    virsh domifaddr "$vm" --source agent 2>/dev/null \
-        | awk '$3 == "ipv4" && $4 !~ /^127\./ { split($4, a, "/"); print a[1]; exit }'
+    local vm="$1" salida
+    # Ver la nota de cloudinit_unidad: nada de tuberías hacia un awk que hace
+    # 'exit', porque con 'pipefail' un SIGPIPE aguas arriba aborta el script.
+    salida="$(virsh domifaddr "$vm" --source agent 2>/dev/null || true)"
+    awk '$3 == "ipv4" && $4 !~ /^127\./ { split($4, a, "/"); print a[1]; exit }' <<< "$salida"
 }
 
 # ¿Está la máquina lista? Si se pidió IP fija, se exige esa IP concreta.
