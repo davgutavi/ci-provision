@@ -139,7 +139,37 @@ Ejecuta siempre desde tu silo:
 | `--virt-viewer` | Consola gráfica SPICE |
 | `--extra-disks` | Añade discos vdb..vdg |
 | `--glusterfs` | Configura nodo GlusterFS |
+| `--dry-run` | Comprueba los datos y muestra lo que se haría, **sin crear nada** |
+| `--no-wait` | No espera a que la máquina termine de configurarse |
 | `-h` | Ayuda |
+
+### 🔍 Sobre `--dry-run`
+
+Ejecuta todas las comprobaciones, genera los ficheros cloud-init y muestra el
+comando `virt-install` exacto que se lanzaría, pero **no crea la máquina, ni
+los discos extra, ni modifica nada**.
+
+Es útil para comprobar que los datos son correctos antes de invertir un par de
+minutos, y para ver el comando que hay detrás del script.
+
+```bash
+./ci-provision.sh --dry-run usuario-server1 server1.qcow2 server1 usuario-red 192.168.XXX.2
+```
+
+Los ficheros de la simulación se escriben en `cloudinit-NOMBRE_VM.dry-run/`,
+así que nunca sobrescriben los de una máquina que ya exista.
+
+### ⏳ Sobre la espera
+
+Tras crear la máquina, el script **espera a que cloud-init termine** de
+instalar los paquetes y ejecutar su configuración, consultando periódicamente
+al agente invitado. Puede tardar entre uno y tres minutos, y al terminar
+muestra la IP de la máquina.
+
+`--no-wait` omite esa espera y devuelve el control de inmediato. Ten en cuenta
+que en ese caso la máquina **seguirá configurándose por dentro** durante un
+rato: si entras enseguida, puede que los paquetes instalados por cloud-init
+(por ejemplo `glusterfs-server`) todavía no estén disponibles.
 
 ---
 
@@ -270,6 +300,12 @@ cloudinit-NOMBRE_VM/
  └── cip-net.yaml   (solo si hay IP estática)
 ```
 
+Con `--dry-run` el directorio es `cloudinit-NOMBRE_VM.dry-run/`.
+
+> ⚠️ Estos ficheros contienen las contraseñas en texto plano, así que el
+> directorio se crea con permisos `700` (solo tú puedes leerlo). Recuerda que
+> el servidor de la asignatura es compartido con el resto de la clase.
+
 ---
 
 # 8. 🧨 Códigos de error
@@ -279,7 +315,9 @@ cloudinit-NOMBRE_VM/
 | **10** | Faltan parámetros obligatorios | Revisa el comando |
 | **11** | Falta valor tras `--user-pass` | Añade contraseña |
 | **12** | Opción desconocida | Consulta `-h` |
-| **20** | Nombre inválido | Formato `usuario-maquina` |
+| **13** | RAM o vCPUs no numéricas | Deben ser números (mínimo 512 MB y 1 vCPU) |
+| **14** | Contraseña con caracteres no ASCII | Sin tildes ni `ñ`: no podrías teclearla en la consola |
+| **20** | Nombre inválido | Formato `usuario-maquina`, solo letras, números, `_` y `-` |
 | **21** | Dominio ya existe | `virsh destroy + undefine` |
 | **30** | No existe el silo | Crear `$HOME/imagenesMV` |
 | **31** | No existe la clave pública | `ssh-keygen` |
@@ -288,15 +326,70 @@ cloudinit-NOMBRE_VM/
 | **34** | No es qcow2 o no es COW | Crear disco COW |
 | **35** | Backing file incorrecto | Debe ser `debian12.qcow2` |
 | **36** | Disco reutilizado (>1 MiB) | Crear disco nuevo |
+| **37** | No existe la imagen base | Descargar `debian12.qcow2` en el silo |
+| **38** | Faltan herramientas en el servidor | Avisar al profesor |
 | **40** | Red virtual no existe | Revisar `virsh net-list` |
-| **41** | IP inválida | Debe ser `192.168.XXX.YYY` |
-| **42** | IP en rango DHCP | Usar IP fuera de 128–254 |
+| **41** | IP inválida o fuera de tu red | El mensaje indica las IPs libres de tu red |
+| **42** | IP ocupada por DHCP o reservada | El mensaje indica las IPs libres de tu red |
+| **43** | No se puede interpretar la red | Revisar `virsh net-dumpxml TU_RED` |
 | **50** | virt-viewer sin acceso válido | Añadir contraseña o root |
 | **60** | Disco extra ya existe | Eliminar archivo o usar otro nombre |
 
+> 💡 Los errores **41** y **42** se comprueban contra la configuración real de
+> tu red virtual (pasarela, máscara, rango DHCP y reservas), no contra unos
+> valores fijos. Si tu red no sigue el esquema del manual, el mensaje te dirá
+> cuáles son sus valores reales y qué direcciones te quedan libres.
+
+Si el script se interrumpe por un fallo inesperado después de haber creado la
+máquina, deshace lo que había hecho: elimina el dominio y los discos extra
+creados **en esa ejecución**. Tu disco principal nunca se toca.
+
 ---
 
-# 9. 👨‍🏫 Autor
+# 9. 🛠️ Desarrollo
+
+> Esta sección es para quien modifique el script. Si eres alumno de la
+> asignatura, no necesitas nada de esto.
+
+El script que se distribuye (`ci-provision.sh`) **se genera**, no se edita a
+mano. El código vive separado en módulos:
+
+```
+src/main.sh          Parseo de opciones, flujo principal y resumen
+lib/validations.sh   Validaciones de entorno, disco, red e IP
+lib/cloudinit.sh     Generación de los ficheros cloud-init
+lib/extra_disks.sh   Creación y enganche de los discos extra
+lib/espera.sh        Espera activa a que cloud-init termine
+```
+
+Tras modificar cualquiera de ellos, regenera el script distribuible:
+
+```bash
+bash tools/build.sh
+```
+
+Los tests usan [bats](https://github.com/bats-core/bats-core), incluido como
+submódulo, así que hay que clonar con:
+
+```bash
+git clone --recurse-submodules https://github.com/davgutavi/ci-provision.git
+```
+
+Si ya lo habías clonado sin los submódulos:
+
+```bash
+git submodule update --init --recursive
+```
+
+Para comprobar las validaciones en un servidor **sin crear ninguna máquina**:
+
+```bash
+bash tools/pruebas-fase-a.sh ./ci-provision.sh
+```
+
+---
+
+# 10. 👨‍🏫 Autor
 
 **David Gutiérrez Avilés**  
 Profesor Titular de Universidad  
