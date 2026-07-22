@@ -21,7 +21,6 @@ attach_extra_disks() {
         virsh attach-disk "$dominio" "$ruta_img" "$unidad" \
             --driver qemu --subdriver qcow2 --targetbus virtio \
             --persistent --live
-        echo "Disk attached successfully"
         echo
     done
 

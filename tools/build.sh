@@ -21,6 +21,8 @@ cat "$ROOT_DIR/lib/cloudinit.sh" >> "$OUT"
 echo >> "$OUT"
 cat "$ROOT_DIR/lib/extra_disks.sh" >> "$OUT"
 echo >> "$OUT"
+cat "$ROOT_DIR/lib/espera.sh" >> "$OUT"
+echo >> "$OUT"
 
 # Script principal, sin shebang, sin 'set -euo pipefail' y sin 'source ...'
 grep -vE '^#!/bin/bash|^set -euo pipefail|^source ' \

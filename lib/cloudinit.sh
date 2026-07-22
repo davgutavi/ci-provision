@@ -1,4 +1,35 @@
 ########################################
+# Expulsión del medio de cloud-init
+#
+# virt-install genera una ISO efímera en /var/lib/libvirt/boot/ con la
+# configuración de cloud-init y la deja enganchada como CD-ROM. libvirt borra
+# ese fichero más adelante, pero la referencia permanece en la definición de
+# la máquina. Si se toma una instantánea mientras la referencia sigue ahí, al
+# revertirla falla con "Cannot access storage file" (apartado B.6 del manual).
+#
+# Expulsando el medio en cuanto la máquina está configurada, las instantáneas
+# que tome después el alumno ya no pueden heredar el problema.
+########################################
+eject_cloudinit_media() {
+    local vm="$1"
+    local unidad
+
+    unidad="$(virsh domblklist "$vm" 2>/dev/null \
+              | awk '$2 ~ /cloudinit\.iso$/ { print $1; exit }')"
+
+    if [[ -z "$unidad" ]]; then
+        return 0
+    fi
+
+    if virsh change-media "$vm" "$unidad" --eject --live --config >/dev/null 2>&1; then
+        echo "✔ Medio de cloud-init expulsado (unidad ${unidad}): ya puedes tomar instantáneas."
+    else
+        echo "AVISO: no se ha podido expulsar el medio de cloud-init de la unidad ${unidad}." >&2
+        echo "       Antes de tomar instantáneas, consulta el apartado B.6 del manual." >&2
+    fi
+}
+
+########################################
 # Generación de ficheros cloud-init
 ########################################
 generate_cloudinit_files() {
@@ -71,14 +102,23 @@ EOF
             echo "  - glusterfs-server"
         fi
 
+        # El orden de runcmd importa: el script espera a que el guest agent
+        # responda para dar la máquina por lista, así que su arranque va lo
+        # más tarde posible. De este modo, que el agente conteste implica que
+        # los paquetes están instalados y que el resto de runcmd ya se ejecutó.
         echo "runcmd:"
         echo "  - timedatectl set-timezone Europe/Madrid"
-        echo "  - systemctl start qemu-guest-agent"
 
         if $GLUSTERFS; then
             # Solo habilitamos glusterd (no se arranca, solo enable)
             echo "  - systemctl enable glusterd"
-            # Reset de machine-id para poder clonar sin conflictos
+        fi
+
+        echo "  - systemctl start qemu-guest-agent"
+
+        if $GLUSTERFS; then
+            # Reset de machine-id para poder clonar sin conflictos. Va después
+            # del arranque del agente para no operar sobre un machine-id vacío.
             echo "  - truncate -s 0 /etc/machine-id"
         fi
     } > "$USER_DATA"

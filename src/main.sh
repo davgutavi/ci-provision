@@ -18,10 +18,13 @@ BASE_IMG="$SILO_DIR/debian12.qcow2"
 # error 36 para que siga siendo coherente.
 DISK_REUSE_MAX_BYTES=1048576
 
-# Tiempos de espera por defecto (en segundos)
-SLEEP_NO_GLUSTER=50      # sin --glusterfs
-SLEEP_WITH_GLUSTER=80    # con --glusterfs
-SLEEP_SECS="$SLEEP_NO_GLUSTER"
+# Espera activa a que cloud-init termine (en segundos)
+# Se sustituyó una espera de duración fija (50 s, u 80 s con --glusterfs) por
+# la consulta periódica al guest agent: las medidas en los tres servidores
+# mostraron que la espera fija se quedaba corta en la mayoría de los casos.
+WAIT_TIMEOUT=300         # tiempo máximo antes de rendirse
+POLL_SECS=3              # cada cuánto se pregunta al agente
+GRACE_SECS=3             # margen tras la respuesta del agente
 
 # Permite saltarse la espera final
 NO_WAIT=false
@@ -44,6 +47,9 @@ IP=""
 RAM_MB=2048
 VCPUS=2
 
+# IP que reporta el guest agent una vez arrancada la máquina
+VM_IP=""
+
 WORKDIR=""
 USER_DATA=""
 META_DATA=""
@@ -56,6 +62,7 @@ NETWORK_DATA=""
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/validations.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/cloudinit.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/extra_disks.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/espera.sh"
 
 ########################################
 # Función de error con código
@@ -197,7 +204,15 @@ print_summary() {
     echo "Disco        : $DISK_PATH"
     echo "Hostname     : $HOSTNAME"
     echo "Red          : $NET_NAME"
-    echo "IP           : ${IP:-(DHCP)}"
+
+    if [[ -n "$IP" ]]; then
+        echo "IP           : $IP (fija)"
+    elif [[ -n "$VM_IP" ]]; then
+        echo "IP           : $VM_IP (DHCP)"
+    else
+        echo "IP           : (DHCP, consúltala con 'virsh domifaddr $VM_NAME --source agent')"
+    fi
+
     echo "RAM          : ${RAM_MB} MB"
     echo "vCPUs        : ${VCPUS}"
 
@@ -277,22 +292,17 @@ main() {
 
     echo "-------------------------------------------"
 
-    # Ajustar tiempo de espera según opciones
     if $NO_WAIT; then
-        SLEEP_SECS=0
+        echo "Omitiendo la espera (--no-wait activo)."
+        echo "NOTA: no se expulsa el medio de cloud-init, porque la máquina puede"
+        echo "      seguir configurándose. Si vas a tomar instantáneas, revisa antes"
+        echo "      el apartado B.6 del manual."
     else
-        if $GLUSTERFS; then
-            SLEEP_SECS="$SLEEP_WITH_GLUSTER"
-        else
-            SLEEP_SECS="$SLEEP_NO_GLUSTER"
+        # Solo se expulsa el medio de cloud-init si consta que la máquina ya
+        # terminó de configurarse: hacerlo antes podría interrumpir a cloud-init.
+        if esperar_maquina "$VM_NAME"; then
+            eject_cloudinit_media "$VM_NAME"
         fi
-    fi
-
-    if (( SLEEP_SECS > 0 )); then
-        echo "Esperando arranque de la máquina (${SLEEP_SECS}s)…"
-        sleep "$SLEEP_SECS"
-    else
-        echo "Omitiendo espera final (--no-wait activo)."
     fi
 
     print_summary

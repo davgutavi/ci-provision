@@ -376,6 +376,37 @@ Usa al menos una de estas opciones:
 }
 
 ########################################
+# Expulsión del medio de cloud-init
+#
+# virt-install genera una ISO efímera en /var/lib/libvirt/boot/ con la
+# configuración de cloud-init y la deja enganchada como CD-ROM. libvirt borra
+# ese fichero más adelante, pero la referencia permanece en la definición de
+# la máquina. Si se toma una instantánea mientras la referencia sigue ahí, al
+# revertirla falla con "Cannot access storage file" (apartado B.6 del manual).
+#
+# Expulsando el medio en cuanto la máquina está configurada, las instantáneas
+# que tome después el alumno ya no pueden heredar el problema.
+########################################
+eject_cloudinit_media() {
+    local vm="$1"
+    local unidad
+
+    unidad="$(virsh domblklist "$vm" 2>/dev/null \
+              | awk '$2 ~ /cloudinit\.iso$/ { print $1; exit }')"
+
+    if [[ -z "$unidad" ]]; then
+        return 0
+    fi
+
+    if virsh change-media "$vm" "$unidad" --eject --live --config >/dev/null 2>&1; then
+        echo "✔ Medio de cloud-init expulsado (unidad ${unidad}): ya puedes tomar instantáneas."
+    else
+        echo "AVISO: no se ha podido expulsar el medio de cloud-init de la unidad ${unidad}." >&2
+        echo "       Antes de tomar instantáneas, consulta el apartado B.6 del manual." >&2
+    fi
+}
+
+########################################
 # Generación de ficheros cloud-init
 ########################################
 generate_cloudinit_files() {
@@ -448,14 +479,23 @@ EOF
             echo "  - glusterfs-server"
         fi
 
+        # El orden de runcmd importa: el script espera a que el guest agent
+        # responda para dar la máquina por lista, así que su arranque va lo
+        # más tarde posible. De este modo, que el agente conteste implica que
+        # los paquetes están instalados y que el resto de runcmd ya se ejecutó.
         echo "runcmd:"
         echo "  - timedatectl set-timezone Europe/Madrid"
-        echo "  - systemctl start qemu-guest-agent"
 
         if $GLUSTERFS; then
             # Solo habilitamos glusterd (no se arranca, solo enable)
             echo "  - systemctl enable glusterd"
-            # Reset de machine-id para poder clonar sin conflictos
+        fi
+
+        echo "  - systemctl start qemu-guest-agent"
+
+        if $GLUSTERFS; then
+            # Reset de machine-id para poder clonar sin conflictos. Va después
+            # del arranque del agente para no operar sobre un machine-id vacío.
             echo "  - truncate -s 0 /etc/machine-id"
         fi
     } > "$USER_DATA"
@@ -514,13 +554,91 @@ attach_extra_disks() {
         virsh attach-disk "$dominio" "$ruta_img" "$unidad" \
             --driver qemu --subdriver qcow2 --targetbus virtio \
             --persistent --live
-        echo "Disk attached successfully"
         echo
     done
 
     echo "✔ Discos extra añadidos correctamente."
     echo
 }
+########################################
+# Espera activa a que cloud-init termine
+#
+# El script instala qemu-guest-agent con cloud-init y lo arranca al final de
+# 'runcmd'. Por lo tanto, que el agente conteste implica que la instalación de
+# paquetes ha terminado y que el resto de runcmd ya se ha ejecutado: es una
+# señal fiable de que la máquina está realmente operativa, y bastante mejor
+# que una espera de duración fija.
+########################################
+
+# Devuelve por stdout la primera IPv4 no local que reporte el guest agent.
+# Cadena vacía si el agente no responde todavía.
+obtener_ip_agente() {
+    local vm="$1"
+    virsh domifaddr "$vm" --source agent 2>/dev/null \
+        | awk '$3 == "ipv4" && $4 !~ /^127\./ { split($4, a, "/"); print a[1]; exit }'
+}
+
+# ¿Está la máquina lista? Si se pidió IP fija, se exige esa IP concreta.
+# Deja la IP detectada en VM_IP.
+maquina_lista() {
+    local vm="$1" ip
+    ip="$(obtener_ip_agente "$vm")"
+
+    if [[ -z "$ip" ]]; then
+        return 1
+    fi
+
+    if [[ -n "$IP" && "$ip" != "$IP" ]]; then
+        return 1
+    fi
+
+    VM_IP="$ip"
+    return 0
+}
+
+# Espera hasta que la máquina esté operativa o se agote WAIT_TIMEOUT.
+# Devuelve 0 si está lista, 1 si se agotó el tiempo.
+esperar_maquina() {
+    local vm="$1"
+    local inicio transcurrido
+    inicio=$SECONDS
+
+    echo "Esperando a que cloud-init termine de configurar la máquina."
+    echo "Se están instalando paquetes: puede tardar entre uno y tres minutos."
+
+    while true; do
+        if maquina_lista "$vm"; then
+            transcurrido=$(( SECONDS - inicio ))
+            if [[ -t 1 ]]; then
+                printf '\r\033[K'
+            fi
+            echo "✔ Máquina operativa tras ${transcurrido}s. IP: ${VM_IP}"
+            # Margen para las últimas órdenes de runcmd, que son instantáneas.
+            sleep "$GRACE_SECS"
+            return 0
+        fi
+
+        transcurrido=$(( SECONDS - inicio ))
+
+        if (( transcurrido >= WAIT_TIMEOUT )); then
+            if [[ -t 1 ]]; then
+                printf '\r\033[K'
+            fi
+            echo "AVISO: la máquina no ha respondido en ${WAIT_TIMEOUT}s." >&2
+            echo "       Puede que siga instalando paquetes. Comprueba su estado con:" >&2
+            echo "         virsh domifaddr $vm --source agent" >&2
+            echo "       Si no responde, entra por consola con: virsh console $vm" >&2
+            return 1
+        fi
+
+        if [[ -t 1 ]]; then
+            printf '\r  ... %ss' "$transcurrido"
+        fi
+
+        sleep "$POLL_SECS"
+    done
+}
+
 
 # Salidas de las herramientas en formato neutro, independiente del idioma
 # configurado en el servidor.
@@ -539,10 +657,13 @@ BASE_IMG="$SILO_DIR/debian12.qcow2"
 # error 36 para que siga siendo coherente.
 DISK_REUSE_MAX_BYTES=1048576
 
-# Tiempos de espera por defecto (en segundos)
-SLEEP_NO_GLUSTER=50      # sin --glusterfs
-SLEEP_WITH_GLUSTER=80    # con --glusterfs
-SLEEP_SECS="$SLEEP_NO_GLUSTER"
+# Espera activa a que cloud-init termine (en segundos)
+# Se sustituyó una espera de duración fija (50 s, u 80 s con --glusterfs) por
+# la consulta periódica al guest agent: las medidas en los tres servidores
+# mostraron que la espera fija se quedaba corta en la mayoría de los casos.
+WAIT_TIMEOUT=300         # tiempo máximo antes de rendirse
+POLL_SECS=3              # cada cuánto se pregunta al agente
+GRACE_SECS=3             # margen tras la respuesta del agente
 
 # Permite saltarse la espera final
 NO_WAIT=false
@@ -564,6 +685,9 @@ NET_NAME=""
 IP=""
 RAM_MB=2048
 VCPUS=2
+
+# IP que reporta el guest agent una vez arrancada la máquina
+VM_IP=""
 
 WORKDIR=""
 USER_DATA=""
@@ -715,7 +839,15 @@ print_summary() {
     echo "Disco        : $DISK_PATH"
     echo "Hostname     : $HOSTNAME"
     echo "Red          : $NET_NAME"
-    echo "IP           : ${IP:-(DHCP)}"
+
+    if [[ -n "$IP" ]]; then
+        echo "IP           : $IP (fija)"
+    elif [[ -n "$VM_IP" ]]; then
+        echo "IP           : $VM_IP (DHCP)"
+    else
+        echo "IP           : (DHCP, consúltala con 'virsh domifaddr $VM_NAME --source agent')"
+    fi
+
     echo "RAM          : ${RAM_MB} MB"
     echo "vCPUs        : ${VCPUS}"
 
@@ -795,22 +927,17 @@ main() {
 
     echo "-------------------------------------------"
 
-    # Ajustar tiempo de espera según opciones
     if $NO_WAIT; then
-        SLEEP_SECS=0
+        echo "Omitiendo la espera (--no-wait activo)."
+        echo "NOTA: no se expulsa el medio de cloud-init, porque la máquina puede"
+        echo "      seguir configurándose. Si vas a tomar instantáneas, revisa antes"
+        echo "      el apartado B.6 del manual."
     else
-        if $GLUSTERFS; then
-            SLEEP_SECS="$SLEEP_WITH_GLUSTER"
-        else
-            SLEEP_SECS="$SLEEP_NO_GLUSTER"
+        # Solo se expulsa el medio de cloud-init si consta que la máquina ya
+        # terminó de configurarse: hacerlo antes podría interrumpir a cloud-init.
+        if esperar_maquina "$VM_NAME"; then
+            eject_cloudinit_media "$VM_NAME"
         fi
-    fi
-
-    if (( SLEEP_SECS > 0 )); then
-        echo "Esperando arranque de la máquina (${SLEEP_SECS}s)…"
-        sleep "$SLEEP_SECS"
-    else
-        echo "Omitiendo espera final (--no-wait activo)."
     fi
 
     print_summary
