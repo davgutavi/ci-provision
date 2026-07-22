@@ -387,22 +387,41 @@ Usa al menos una de estas opciones:
 # Expulsando el medio en cuanto la máquina está configurada, las instantáneas
 # que tome después el alumno ya no pueden heredar el problema.
 ########################################
+# Devuelve la unidad que tiene enganchada la ISO de cloud-init, mirando tanto
+# la definición activa como la persistente. Cadena vacía si no hay ninguna.
+cloudinit_unidad() {
+    local vm="$1"
+    {
+        virsh domblklist "$vm" 2>/dev/null
+        virsh domblklist "$vm" --inactive 2>/dev/null
+    } | awk '$2 ~ /cloudinit\.iso$/ { print $1; exit }'
+}
+
 eject_cloudinit_media() {
     local vm="$1"
     local unidad
 
-    unidad="$(virsh domblklist "$vm" 2>/dev/null \
-              | awk '$2 ~ /cloudinit\.iso$/ { print $1; exit }')"
+    unidad="$(cloudinit_unidad "$vm")"
 
     if [[ -z "$unidad" ]]; then
         return 0
     fi
 
-    if virsh change-media "$vm" "$unidad" --eject --live --config >/dev/null 2>&1; then
+    # Se intenta por separado sobre cada definición. Según el momento, libvirt
+    # ya puede haber limpiado una de las dos por su cuenta, y entonces esa
+    # llamada falla ('The disk device doesn't have media') aunque la otra sea
+    # necesaria y perfectamente posible. Hacerlo en una sola llamada con
+    # --live --config aborta las dos.
+    virsh change-media "$vm" "$unidad" --eject --live   >/dev/null 2>&1 || true
+    virsh change-media "$vm" "$unidad" --eject --config >/dev/null 2>&1 || true
+
+    # Lo que decide es el estado final, no el código de salida de los intentos.
+    if [[ -z "$(cloudinit_unidad "$vm")" ]]; then
         echo "✔ Medio de cloud-init expulsado (unidad ${unidad}): ya puedes tomar instantáneas."
     else
         echo "AVISO: no se ha podido expulsar el medio de cloud-init de la unidad ${unidad}." >&2
-        echo "       Antes de tomar instantáneas, consulta el apartado B.6 del manual." >&2
+        echo "       Apaga la máquina antes de tomar instantáneas y, si el revert falla," >&2
+        echo "       consulta el apartado B.6 del manual." >&2
     fi
 }
 
