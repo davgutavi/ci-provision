@@ -32,9 +32,13 @@ LOG="$SILO/pruebas-servidor-$(date +%Y%m%d-%H%M%S).log"
 ########################################
 # Utilidades
 ########################################
+# Colores solo si la salida es un terminal: así se puede filtrar con
+#   ... | grep -E '^(═|  [✔✘·])'
+if [[ -t 1 ]]; then V=$'\033[32m'; R=$'\033[31m'; N=$'\033[0m'; else V=""; R=""; N=""; fi
+
 titulo() { echo; echo "═══ $* ═══"; }
-ok()     { OK=$(( OK + 1 )); printf '  \033[32m✔\033[0m %s\n' "$*"; }
-ko()     { KO=$(( KO + 1 )); printf '  \033[31m✘\033[0m %s\n' "$*"; }
+ok()     { OK=$(( OK + 1 )); printf '  %s✔%s %s\n' "$V" "$N" "$*"; }
+ko()     { KO=$(( KO + 1 )); printf '  %s✘%s %s\n' "$R" "$N" "$*"; }
 info()   { printf '  · %s\n' "$*"; }
 
 # comprueba DESCRIPCION COMANDO...   (éxito = ok)
