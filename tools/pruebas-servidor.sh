@@ -171,7 +171,8 @@ fase_b() {
     titulo "Fase B: máquinas sueltas"
     descubrir_red
     if ! ssh-add -l >/dev/null 2>&1; then
-        echo "  Tu clave SSH no está cargada en el agente. Ejecuta antes:  ssh-add"
+        ko "tu clave SSH no está cargada en el agente; las comprobaciones por SSH no funcionarían"
+        echo "  · Ejecuta antes, en esta misma sesión:  eval \"\$(ssh-agent -s)\" && ssh-add"
         exit 1
     fi
     elimina_maquina pruebas1
@@ -281,7 +282,8 @@ fase_c() {
     titulo "Fase C: clúster GlusterFS"
     descubrir_red
     if ! ssh-add -l >/dev/null 2>&1; then
-        echo "  Tu clave SSH no está cargada en el agente. Ejecuta antes:  ssh-add"
+        ko "tu clave SSH no está cargada en el agente; las comprobaciones por SSH no funcionarían"
+        echo "  · Ejecuta antes, en esta misma sesión:  eval \"\$(ssh-agent -s)\" && ssh-add"
         exit 1
     fi
 
