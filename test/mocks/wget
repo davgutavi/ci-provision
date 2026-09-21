@@ -1,0 +1,24 @@
+#!/bin/bash
+# wget simulado: "descarga" la imagen base creando un qcow2 pequeño.
+#   MOCK_WGET_FALLA=1     falla como si no hubiera conexión
+#   MOCK_WGET_CORRUPTO=1  entrega una página HTML en vez de la imagen
+S="${MOCK_STATE:?}"
+echo "wget $*" >> "$S/log"
+salida=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -O) salida="$2"; shift 2 ;;
+        *)  shift ;;
+    esac
+done
+[[ -n "$salida" ]] || { echo "mock wget: falta -O" >&2; exit 2; }
+if [[ -n "${MOCK_WGET_FALLA:-}" ]]; then
+    echo "mock wget: unable to resolve host address" >&2
+    exit 4
+fi
+if [[ -n "${MOCK_WGET_CORRUPTO:-}" ]]; then
+    echo "<html><body>Portal cautivo</body></html>" > "$salida"
+    exit 0
+fi
+qemu-img create -f qcow2 "$salida" 3G >/dev/null
+exit 0

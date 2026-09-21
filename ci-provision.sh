@@ -345,22 +345,72 @@ calcular_ips_cluster() {
 }
 
 ########################################
-# Comprobación de la imagen base
+# Imagen base: si no está, se descarga; si está, se comprueba
 ########################################
-comprobar_imagen_base() {
-    if [[ ! -f "$BASE_IMG" ]]; then
-        error 37 "No se encuentra la imagen base '$BASE_IMG'.
-Descárgala en el silo con el nombre $(basename "$BASE_IMG") (apartado 5.3.1 del manual)."
+descargar_imagen_base() {
+    local tmp="${BASE_IMG}.descargando"
+
+    echo "→ No está $(basename "$BASE_IMG") en el silo. Se descarga de:"
+    echo "  $BASE_IMG_URL  (unos 430 MB; puede tardar un rato)"
+
+    # Se descarga a un nombre temporal y solo se renombra si termina bien:
+    # así una descarga a medias nunca se confunde con la imagen.
+    rm -f "$tmp"
+    DISCOS_CREADOS+=( "$tmp" )
+
+    local rc=0
+    if command -v wget >/dev/null 2>&1; then
+        wget -q --show-progress -O "$tmp" "$BASE_IMG_URL" || rc=$?
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fL --progress-bar -o "$tmp" "$BASE_IMG_URL" || rc=$?
+    else
+        error 38 "No hay ni wget ni curl para descargar la imagen base.
+Descárgala tú en el silo con el nombre $(basename "$BASE_IMG") (apartado 5.3.1 del manual)."
     fi
 
-    # Se usa la salida JSON: campos tipados, sin interpretar texto ni unidades
+    if (( rc != 0 )); then
+        rm -f "$tmp"
+        quitar_disco_creado "$tmp"
+        error 37 "No se ha podido descargar la imagen base (código $rc).
+Comprueba la conexión, o descárgala tú:
+  wget $BASE_IMG_URL -O $BASE_IMG"
+    fi
+
+    mv "$tmp" "$BASE_IMG"
+    quitar_disco_creado "$tmp"
+    echo "✔ Imagen base descargada: $BASE_IMG"
+}
+
+comprobar_imagen_base() {
+    local recien_descargada=false
+
+    if [[ ! -f "$BASE_IMG" ]]; then
+        if $DRY_RUN; then
+            echo "AVISO: no está $(basename "$BASE_IMG") en el silo. Al ejecutar sin --dry-run se descargará de:"
+            echo "       $BASE_IMG_URL"
+            return 0
+        fi
+        descargar_imagen_base
+        recien_descargada=true
+    fi
+
+    # Se usa la salida JSON: campos tipados, sin interpretar texto ni unidades.
+    # -U (force-share) por si alguna máquina en ejecución tiene abierta la
+    # imagen; sin él, qemu-img se niega por el bloqueo de escritura.
     local info fmt
-    info="$(qemu-img info --output=json "$BASE_IMG" 2>/dev/null || true)"
+    info="$(qemu-img info -U --output=json "$BASE_IMG" 2>/dev/null || true)"
     fmt="$(printf '%s' "$info" | jq -r '.format // empty' 2>/dev/null || true)"
 
     if [[ "$fmt" != "qcow2" ]]; then
+        if $recien_descargada; then
+            rm -f "$BASE_IMG"
+            error 37 "Lo descargado no es un qcow2 válido (formato: ${fmt:-desconocido}); se ha eliminado.
+Puede que la red del servidor esté redirigiendo la descarga. Descárgala tú:
+  wget $BASE_IMG_URL -O $BASE_IMG"
+        fi
         error 37 "La imagen base '$BASE_IMG' no es un qcow2 válido (formato: ${fmt:-desconocido}).
-Probablemente la descarga falló. Bórrala y descárgala de nuevo (apartado 5.3.1 del manual)."
+Probablemente la descarga falló. Bórrala y vuelve a ejecutar el script, que la descargará:
+  rm $BASE_IMG"
     fi
 }
 
@@ -384,8 +434,6 @@ validar_entorno() {
 Créalo según el apartado 5.1 del manual."
     fi
 
-    comprobar_imagen_base
-
     # Clave pública existente
     if [[ ! -f "$PUBKEY_PATH" ]]; then
         error 31 "No existe la clave pública en $PUBKEY_PATH. Genera una con: ssh-keygen"
@@ -405,6 +453,10 @@ Créalo según el apartado 5.1 del manual."
     elif [[ -n "$IP" ]]; then
         validar_ip_fija "$IP"
     fi
+
+    # La imagen base, en último lugar: si falta hay que descargarla, y no
+    # tiene sentido hacerlo para fallar después por un dato mal escrito
+    comprobar_imagen_base
 }
 
 ########################################
@@ -750,6 +802,18 @@ crear_disco_vacio() {
 
     DISCOS_CREADOS+=( "$ruta" )
     qemu-img create -f qcow2 "$ruta" "$tam" >/dev/null
+}
+
+# Quita un fichero del registro de creados (cuando pasa a ser definitivo)
+quitar_disco_creado() {
+    local quitar="$1" d
+    local -a nuevos=()
+    for d in ${DISCOS_CREADOS[@]+"${DISCOS_CREADOS[@]}"}; do
+        if [[ "$d" != "$quitar" ]]; then
+            nuevos+=( "$d" )
+        fi
+    done
+    DISCOS_CREADOS=( ${nuevos[@]+"${nuevos[@]}"} )
 }
 
 ########################################
@@ -1191,6 +1255,8 @@ export LC_ALL=C
 SILO_DIR="$HOME/imagenesMV"
 PUBKEY_PATH="$HOME/.ssh/id_rsa.pub"
 BASE_IMG="$SILO_DIR/debian12.qcow2"
+# De dónde se descarga si no está en el silo (la misma URL del manual)
+BASE_IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
 
 # Usuario del servidor: de él salen los nombres de los dominios y el de la red
 USUARIO="$(id -un)"
@@ -1357,7 +1423,8 @@ Uso:
 Crea una máquina virtual Debian 12 con cloud-init en tu silo ($SILO_DIR).
 De MAQUINA salen el nombre del dominio (${USUARIO}-MAQUINA), el nombre de
 host (MAQUINA) y el disco (MAQUINA.qcow2), que el script crea como copia COW
-de debian12.qcow2. La red virtual se busca por tu nombre de usuario.
+de debian12.qcow2 (si no está en el silo, la descarga). La red virtual se
+busca por tu nombre de usuario.
 
 Parámetros:
   MAQUINA              Nombre corto de la máquina (server1, server2, glusterbase, ...)

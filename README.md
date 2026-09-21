@@ -64,7 +64,11 @@ Debe estar ubicada en el silo y llamarse **debian12.qcow2**:
 $HOME/imagenesMV/debian12.qcow2
 ```
 
-### Para obtenerla:
+**Si no está, el script la descarga** (unos 430 MB) la primera vez que lo
+ejecutes. Solo la guarda con ese nombre si la descarga termina bien y es una
+imagen válida; con `--dry-run` no descarga, solo avisa.
+
+### Para obtenerla tú mismo, si lo prefieres:
 
 **wget:**
 ```bash
@@ -351,8 +355,8 @@ manual.
 | **21** | Ya existe el dominio o algún disco | El mensaje indica cómo eliminarlos, o usa `--limpiar` |
 | **30** | No existe el silo | Crear `$HOME/imagenesMV` |
 | **31** | No existe la clave pública | `ssh-keygen` |
-| **37** | No existe la imagen base o está corrupta | Descargar `debian12.qcow2` en el silo |
-| **38** | Faltan herramientas o no hay conexión con libvirt | Avisar al profesor |
+| **37** | No se ha podido descargar la imagen base, o la que hay está corrupta | El mensaje indica el `wget` manual, o el `rm` para que el script la vuelva a descargar |
+| **38** | Faltan herramientas (incluido `wget`/`curl` para descargar la imagen) o no hay conexión con libvirt | Avisar al profesor |
 | **40** | No se encuentra tu red virtual | Créala según el apartado 5.2, o usa `--red` |
 | **41** | IP no válida o fuera de tu red | El mensaje indica las IPs libres de tu red |
 | **42** | IP ocupada por DHCP o reservada | El mensaje indica las IPs libres de tu red |

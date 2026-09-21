@@ -11,6 +11,8 @@ export LC_ALL=C
 SILO_DIR="$HOME/imagenesMV"
 PUBKEY_PATH="$HOME/.ssh/id_rsa.pub"
 BASE_IMG="$SILO_DIR/debian12.qcow2"
+# De dónde se descarga si no está en el silo (la misma URL del manual)
+BASE_IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
 
 # Usuario del servidor: de él salen los nombres de los dominios y el de la red
 USUARIO="$(id -un)"
@@ -183,7 +185,8 @@ Uso:
 Crea una máquina virtual Debian 12 con cloud-init en tu silo ($SILO_DIR).
 De MAQUINA salen el nombre del dominio (${USUARIO}-MAQUINA), el nombre de
 host (MAQUINA) y el disco (MAQUINA.qcow2), que el script crea como copia COW
-de debian12.qcow2. La red virtual se busca por tu nombre de usuario.
+de debian12.qcow2 (si no está en el silo, la descarga). La red virtual se
+busca por tu nombre de usuario.
 
 Parámetros:
   MAQUINA              Nombre corto de la máquina (server1, server2, glusterbase, ...)

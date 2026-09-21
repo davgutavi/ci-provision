@@ -130,18 +130,58 @@ qinfo() {
     assert_failure 30
 }
 
-@test "sin imagen base: error 37" {
+@test "sin imagen base: la descarga y continúa" {
     rm -f "$SILO/debian12.qcow2"
-    run bash "$SCRIPT" --dry-run server1
-    assert_failure 37
-    assert_output --partial "debian12.qcow2"
+    run bash "$SCRIPT" --no-wait server1
+    assert_success
+    assert_output --partial "Se descarga de:"
+    assert_output --partial "Imagen base descargada"
+    [ "$(llamadas '^wget .*debian-12-generic-amd64.qcow2')" -eq 1 ]
+    [ "$(qinfo "$SILO/debian12.qcow2" '.format')" = "qcow2" ]
+    [ ! -e "$SILO/debian12.qcow2.descargando" ]
+    [ "$(qinfo "$SILO/server1.qcow2" '."backing-filename"')" = "debian12.qcow2" ]
 }
 
-@test "imagen base que no es un qcow2 (descarga fallida): error 37" {
+@test "sin imagen base y --dry-run: avisa de que la descargaría, sin descargar" {
+    rm -f "$SILO/debian12.qcow2"
+    run bash "$SCRIPT" --dry-run server1
+    assert_success
+    assert_output --partial "se descargará de"
+    [ "$(llamadas '^wget')" -eq 0 ]
+    [ ! -e "$SILO/debian12.qcow2" ]
+}
+
+@test "la descarga se hace después de las demás validaciones" {
+    rm -f "$SILO/debian12.qcow2"
+    run bash "$SCRIPT" server1 192.168.7.200
+    assert_failure 42
+    [ "$(llamadas '^wget')" -eq 0 ]
+}
+
+@test "descarga fallida: error 37 con el comando manual y sin restos" {
+    rm -f "$SILO/debian12.qcow2"
+    MOCK_WGET_FALLA=1 run bash "$SCRIPT" server1
+    assert_failure 37
+    assert_output --partial "wget https://cloud.debian.org"
+    [ ! -e "$SILO/debian12.qcow2" ]
+    [ ! -e "$SILO/debian12.qcow2.descargando" ]
+    refute_output --partial "Deshaciendo"
+}
+
+@test "descarga corrupta (portal cautivo): error 37 y se elimina lo descargado" {
+    rm -f "$SILO/debian12.qcow2"
+    MOCK_WGET_CORRUPTO=1 run bash "$SCRIPT" server1
+    assert_failure 37
+    assert_output --partial "se ha eliminado"
+    [ ! -e "$SILO/debian12.qcow2" ]
+}
+
+@test "imagen base existente que no es un qcow2: error 37 y NO se toca" {
     echo "<html>404</html>" > "$SILO/debian12.qcow2"
     run bash "$SCRIPT" --dry-run server1
     assert_failure 37
-    assert_output --partial "descárgala de nuevo"
+    assert_output --partial "rm $SILO/debian12.qcow2"
+    [ -e "$SILO/debian12.qcow2" ]
 }
 
 @test "sin clave pública: error 31" {

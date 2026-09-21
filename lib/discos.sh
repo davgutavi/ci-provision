@@ -29,3 +29,15 @@ crear_disco_vacio() {
     DISCOS_CREADOS+=( "$ruta" )
     qemu-img create -f qcow2 "$ruta" "$tam" >/dev/null
 }
+
+# Quita un fichero del registro de creados (cuando pasa a ser definitivo)
+quitar_disco_creado() {
+    local quitar="$1" d
+    local -a nuevos=()
+    for d in ${DISCOS_CREADOS[@]+"${DISCOS_CREADOS[@]}"}; do
+        if [[ "$d" != "$quitar" ]]; then
+            nuevos+=( "$d" )
+        fi
+    done
+    DISCOS_CREADOS=( ${nuevos[@]+"${nuevos[@]}"} )
+}
