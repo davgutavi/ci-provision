@@ -9,6 +9,9 @@ NET_DHCP_STARTS=()
 NET_DHCP_ENDS=()
 NET_RESERVED=()
 
+# IPs de los nodos del clúster (se calculan a partir de la red)
+CLUSTER_IPS=()
+
 ########################################
 # Utilidades: herramientas y aritmética de IPs
 ########################################
@@ -90,6 +93,70 @@ xml_attr() {
     printf '%s' "$valor"
 }
 
+# Dirección de red y de difusión (enteros) de la red cargada
+red_neti()   { local gwi maski; gwi="$(ip_to_int "$NET_GATEWAY")"; maski=$(( 0xFFFFFFFF ^ ((1 << (32 - NET_PREFIX)) - 1) )); printf '%s' $(( gwi & maski )); }
+red_bcasti() { local neti maski; neti="$(red_neti)"; maski=$(( 0xFFFFFFFF ^ ((1 << (32 - NET_PREFIX)) - 1) )); printf '%s' $(( neti | (~maski & 0xFFFFFFFF) )); }
+
+########################################
+# Elección de la red virtual
+#
+# El manual pide llamarla USUARIO-red, pero en los servidores hay redes con
+# otros sufijos (-net, -network, _red, sin sufijo) y usuarios con más de una.
+# Se busca entre las que empiezan por el usuario; si hay dudas, se pide --red.
+########################################
+detectar_red() {
+    if [[ -n "$RED_OPT" ]]; then
+        if ! virsh net-info "$RED_OPT" >/dev/null 2>&1; then
+            error 40 "La red '$RED_OPT' (--red) no existe.
+Consulta las redes disponibles con: virsh net-list --all"
+        fi
+        NET_NAME="$RED_OPT"
+    else
+        local todas r usuario_min candidatas=() elegida=""
+        usuario_min="${USUARIO,,}"
+        todas="$(virsh net-list --all --name 2>/dev/null || true)"
+
+        while IFS= read -r r; do
+            [[ -z "$r" ]] && continue
+            local r_min="${r,,}"
+            if [[ "$r_min" == "$usuario_min" || "$r_min" == "${usuario_min}-"* || "$r_min" == "${usuario_min}_"* ]]; then
+                candidatas+=( "$r" )
+            fi
+        done <<< "$todas"
+
+        for r in ${candidatas[@]+"${candidatas[@]}"}; do
+            if [[ "$r" == "${USUARIO}-red" ]]; then
+                elegida="$r"
+            fi
+        done
+
+        if [[ -z "$elegida" ]]; then
+            if (( ${#candidatas[@]} == 1 )); then
+                elegida="${candidatas[0]}"
+            elif (( ${#candidatas[@]} == 0 )); then
+                error 40 "No encuentro ninguna red virtual con tu nombre de usuario ('$USUARIO').
+Crea tu red virtual según el apartado 5.2 del manual, con el nombre '${USUARIO}-red',
+o indica cuál usar con: --red NOMBRE
+Redes existentes: virsh net-list --all"
+            else
+                error 44 "Hay varias redes virtuales con tu nombre de usuario: ${candidatas[*]}
+Indica cuál usar con: --red NOMBRE"
+            fi
+        fi
+
+        NET_NAME="$elegida"
+    fi
+
+    # La red tiene que estar activa para que virt-install pueda conectar la máquina
+    local activa
+    activa="$(virsh net-info "$NET_NAME" 2>/dev/null | awk '/^Active:/ { print $2 }')"
+    if [[ "$activa" != "yes" ]]; then
+        error 45 "La red '$NET_NAME' existe pero está inactiva.
+Actívala con:            virsh net-start $NET_NAME
+Para que arranque sola:  virsh net-autostart $NET_NAME"
+    fi
+}
+
 ########################################
 # Introspección de la red virtual
 #
@@ -135,7 +202,7 @@ Consulta las redes disponibles con: virsh net-list --all"
 
     # Nombre de dominio de la red (puede no existir)
     local domline
-    domline="$(printf '%s\n' "$xml" | grep -E '<domain[[:space:]]' | head -n1 || true)"
+    domline="$( { printf '%s\n' "$xml" | grep -E '<domain[[:space:]]' | head -n1; } || true )"
     if [[ -n "$domline" ]]; then
         NET_DOMAIN="$(xml_attr "$domline" name)"
     fi
@@ -158,7 +225,9 @@ Consulta las redes disponibles con: virsh net-list --all"
 
 # Imprime hasta 3 bloques de IPs libres para asignación fija
 free_ip_blocks() {
-    local neti="$1" bcasti="$2"
+    local neti bcasti
+    neti="$(red_neti)"
+    bcasti="$(red_bcasti)"
     local -a ini fin
     local i orden cur s e mostrados
 
@@ -205,35 +274,35 @@ free_ip_blocks() {
     fi
 }
 
-# Valida la IP fija solicitada contra la configuración real de la red
-validate_static_ip() {
-    [[ -z "$IP" ]] && return 0
+# Valida una IP fija contra la configuración real de la red
+validar_ip_fija() {
+    local ip="$1"
 
-    if ! valid_ipv4 "$IP"; then
-        error 41 "La IP '$IP' no es una dirección IPv4 válida."
+    if ! valid_ipv4 "$ip"; then
+        error 41 "La IP '$ip' no es una dirección IPv4 válida."
     fi
 
-    local ipi gwi maski neti bcasti
-    ipi="$(ip_to_int "$IP")"
+    local ipi gwi neti bcasti maski
+    ipi="$(ip_to_int "$ip")"
     gwi="$(ip_to_int "$NET_GATEWAY")"
     maski=$(( 0xFFFFFFFF ^ ((1 << (32 - NET_PREFIX)) - 1) ))
-    neti=$(( gwi & maski ))
-    bcasti=$(( neti | (~maski & 0xFFFFFFFF) ))
+    neti="$(red_neti)"
+    bcasti="$(red_bcasti)"
 
     if (( (ipi & maski) != neti )); then
-        error 41 "La IP '$IP' no pertenece a la red '$NET_NAME'.
+        error 41 "La IP '$ip' no pertenece a la red '$NET_NAME'.
 Red      : $(int_to_ip "$neti")/${NET_PREFIX}
 Pasarela : ${NET_GATEWAY}
 IPs libres para asignación fija:
-$(free_ip_blocks "$neti" "$bcasti")"
+$(free_ip_blocks)"
     fi
 
     if (( ipi == neti || ipi == bcasti )); then
-        error 41 "La IP '$IP' es la dirección de red o la de difusión de '$NET_NAME'. No se puede asignar a una máquina."
+        error 41 "La IP '$ip' es la dirección de red o la de difusión de '$NET_NAME'. No se puede asignar a una máquina."
     fi
 
     if (( ipi == gwi )); then
-        error 41 "La IP '$IP' es la pasarela de la red '$NET_NAME'. Elige otra."
+        error 41 "La IP '$ip' es la pasarela de la red '$NET_NAME'. Elige otra."
     fi
 
     # Dentro de algún rango DHCP
@@ -242,11 +311,11 @@ $(free_ip_blocks "$neti" "$bcasti")"
         si="$(ip_to_int "${NET_DHCP_STARTS[$i]}")"
         ei="$(ip_to_int "${NET_DHCP_ENDS[$i]}")"
         if (( ipi >= si && ipi <= ei )); then
-            error 42 "La IP '$IP' está dentro del rango DHCP de la red '$NET_NAME' (${NET_DHCP_STARTS[$i]} - ${NET_DHCP_ENDS[$i]}).
+            error 42 "La IP '$ip' está dentro del rango DHCP de la red '$NET_NAME' (${NET_DHCP_STARTS[$i]} - ${NET_DHCP_ENDS[$i]}).
 Si se la asignas de forma fija, el servidor DHCP puede entregársela a otra máquina.
 Pasarela : ${NET_GATEWAY}
 IPs libres para asignación fija:
-$(free_ip_blocks "$neti" "$bcasti")
+$(free_ip_blocks)
 
 También puedes omitir el parámetro IP para que la máquina use DHCP."
         fi
@@ -254,131 +323,83 @@ También puedes omitir el parámetro IP para que la máquina use DHCP."
 
     # Coincide con una reserva estática
     for (( i = 0; i < ${#NET_RESERVED[@]}; i++ )); do
-        if [[ "$IP" == "${NET_RESERVED[$i]}" ]]; then
-            error 42 "La IP '$IP' ya está reservada por MAC en la red '$NET_NAME'.
+        if [[ "$ip" == "${NET_RESERVED[$i]}" ]]; then
+            error 42 "La IP '$ip' ya está reservada por MAC en la red '$NET_NAME'.
 IPs libres para asignación fija:
-$(free_ip_blocks "$neti" "$bcasti")"
+$(free_ip_blocks)"
         fi
     done
 }
 
+# Calcula las IPs de los nodos del clúster (.10, .11, ...) dentro de la red
+calcular_ips_cluster() {
+    local neti i
+    neti="$(red_neti)"
+    CLUSTER_IPS=()
+    for (( i = 0; i < ${#CLUSTER_NODOS[@]}; i++ )); do
+        CLUSTER_IPS+=( "$(int_to_ip $(( neti + CLUSTER_IP_INICIAL + i )))" )
+    done
+}
+
 ########################################
-# Validaciones generales (entorno, disco, red, opciones)
+# Comprobación de la imagen base
 ########################################
-validate_environment() {
+comprobar_imagen_base() {
+    if [[ ! -f "$BASE_IMG" ]]; then
+        error 37 "No se encuentra la imagen base '$BASE_IMG'.
+Descárgala en el silo con el nombre $(basename "$BASE_IMG") (apartado 5.3.1 del manual)."
+    fi
+
+    # Se usa la salida JSON: campos tipados, sin interpretar texto ni unidades
+    local info fmt
+    info="$(qemu-img info --output=json "$BASE_IMG" 2>/dev/null || true)"
+    fmt="$(printf '%s' "$info" | jq -r '.format // empty' 2>/dev/null || true)"
+
+    if [[ "$fmt" != "qcow2" ]]; then
+        error 37 "La imagen base '$BASE_IMG' no es un qcow2 válido (formato: ${fmt:-desconocido}).
+Probablemente la descarga falló. Bórrala y descárgala de nuevo (apartado 5.3.1 del manual)."
+    fi
+}
+
+########################################
+# Validaciones generales
+########################################
+validar_entorno() {
 
     # Herramientas necesarias
-    require_commands qemu-img virsh virt-install jq
+    require_commands qemu-img virsh virt-install jq base64
+
+    # Conexión con libvirt
+    if ! virsh list --name >/dev/null 2>&1; then
+        error 38 "No se puede conectar con libvirt (virsh).
+¿Estás en el servidor de la asignatura? Prueba: virsh list --all"
+    fi
 
     # Silo existente
     if [[ ! -d "$SILO_DIR" ]]; then
-        error 30 "No existe el silo en: $SILO_DIR"
+        error 30 "No existe el silo en: $SILO_DIR
+Créalo según el apartado 5.1 del manual."
     fi
 
-    # Imagen base existente
-    if [[ ! -f "$BASE_IMG" ]]; then
-        error 37 "No se encuentra la imagen base '$BASE_IMG'.
-Descárgala y guárdala como debian12.qcow2 en el silo."
-    fi
+    comprobar_imagen_base
 
     # Clave pública existente
     if [[ ! -f "$PUBKEY_PATH" ]]; then
         error 31 "No existe la clave pública en $PUBKEY_PATH. Genera una con: ssh-keygen"
     fi
 
-    # Disco en silo (resolver ruta y normalizarla)
-    if [[ "$DISK_ARG" = /* ]]; then
-        DISK_PATH="$DISK_ARG"
-    else
-        DISK_PATH="$SILO_DIR/$DISK_ARG"
-    fi
-
-    if [[ ! -f "$DISK_PATH" ]]; then
-        error 32 "El disco no existe: $DISK_PATH"
-    fi
-
-    # Se normaliza la ruta para que '..' no permita salirse del silo
-    local SILO_REAL
-    DISK_PATH="$(realpath "$DISK_PATH")"
-    SILO_REAL="$(realpath "$SILO_DIR")"
-
-    case "$DISK_PATH" in
-        "$SILO_REAL"/*) ;;
-        *)
-            error 33 "El disco debe estar dentro del silo: $SILO_DIR"
-            ;;
-    esac
-
-    ########################################
-    # Comprobaciones del disco con qemu-img
-    #
-    # Se usa la salida JSON en lugar de la de texto: 'actual-size' viene en
-    # bytes exactos, con lo que no hay que interpretar unidades (KiB/MiB/GiB)
-    # ni depender de 'bc'.
-    ########################################
-    local INFO
-    if ! INFO="$(qemu-img info --output=json "$DISK_PATH" 2>/dev/null)"; then
-        error 34 "No se ha podido obtener información con 'qemu-img info' sobre $DISK_PATH"
-    fi
-
-    local FILE_FMT BACKING_NAME BACKING_FMT ACTUAL_SIZE
-    FILE_FMT="$(printf '%s' "$INFO"    | jq -r '.format // empty')"
-    BACKING_NAME="$(printf '%s' "$INFO" | jq -r '."backing-filename" // empty')"
-    BACKING_FMT="$(printf '%s' "$INFO"  | jq -r '."backing-filename-format" // empty')"
-    ACTUAL_SIZE="$(printf '%s' "$INFO"  | jq -r '."actual-size" // 0')"
-
-    if [[ "$FILE_FMT" != "qcow2" ]]; then
-        error 34 "El disco $DISK_PATH no es qcow2 (file format: ${FILE_FMT:-desconocido})."
-    fi
-
-    if [[ -z "$BACKING_NAME" ]]; then
-        error 34 "El disco $DISK_PATH no parece ser una copia COW (no tiene 'backing file')."
-    fi
-
-    if [[ "$BACKING_FMT" != "qcow2" ]]; then
-        error 34 "El disco $DISK_PATH no parece una copia COW de otra imagen qcow2 (backing file format: ${BACKING_FMT:-desconocido})."
-    fi
-
-    if [[ "$(basename "$BACKING_NAME")" != "$(basename "$BASE_IMG")" ]]; then
-        error 35 "El disco $DISK_PATH no está haciendo COW sobre $(basename "$BASE_IMG").
-Backing actual: $BACKING_NAME
-Esperado: $(basename "$BASE_IMG")
-
-Vuelve a crear el disco con:
-  qemu-img create -f qcow2 -b debian12.qcow2 -F qcow2 NOMBRE.qcow2 40G"
-    fi
-
-    if (( ACTUAL_SIZE > DISK_REUSE_MAX_BYTES )); then
-        error 36 "El disco $DISK_PATH parece reutilizado: ocupa $ACTUAL_SIZE bytes, más del máximo admitido ($DISK_REUSE_MAX_BYTES bytes).
-Un disco recién creado ocupa unos 200 KB.
-
-Crea un disco nuevo con:
-  qemu-img create -f qcow2 -b debian12.qcow2 -F qcow2 NOMBRE.qcow2 40G"
-    fi
-
-    # Red: se leen sus datos reales y se valida la IP contra ellos
+    # Red: elegirla y leer sus datos reales
+    detectar_red
     load_network_info
-    validate_static_ip
 
-    # VALIDACIÓN LÓGICA: virt-viewer requiere contraseña de admin o root habilitado
-    if $ENABLE_GRAPHICS; then
-        if [[ -z "$USER_PASS" && $ENABLE_ROOT = false ]]; then
-            error 50 "Para usar --virt-viewer debes habilitar acceso por consola.
-Usa al menos una de estas opciones:
-  --user-pass PASSWORD
-  --enable-root"
-        fi
-    fi
-
-    # Pre-check de discos extra: si se van a crear, comprobar que no existan
-    if $EXTRA_DISKS; then
-        local maquina
-        maquina="${VM_NAME#*-}"
-        for unidad in vdb vdc vdd vde vdf vdg; do
-            local ruta_extra="${SILO_DIR}/${maquina}-${unidad}.qcow2"
-            if [[ -e "$ruta_extra" ]]; then
-                error 60 "El disco extra '$ruta_extra' ya existe. Elimínalo o usa otro nombre de dominio."
-            fi
+    # IPs fijas, contra la red real
+    if $CLUSTER; then
+        calcular_ips_cluster
+        local ip
+        for ip in "${CLUSTER_IPS[@]}"; do
+            validar_ip_fija "$ip"
         done
+    elif [[ -n "$IP" ]]; then
+        validar_ip_fija "$IP"
     fi
 }

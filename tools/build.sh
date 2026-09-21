@@ -3,7 +3,12 @@ set -euo pipefail
 
 # Directorio raíz del repositorio (subimos un nivel desde tools/)
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="$ROOT_DIR/ci-provision.sh"
+# Se puede indicar otra salida (lo usan los tests para comprobar que el
+# script distribuible está al día respecto a los fuentes)
+OUT="${1:-$ROOT_DIR/ci-provision.sh}"
+
+# Librerías, en el orden en que las carga src/main.sh
+LIBS=(validations limpieza cloudinit discos espera cluster)
 
 echo "Generando script standalone en: $OUT"
 
@@ -15,14 +20,10 @@ echo "Generando script standalone en: $OUT"
 } > "$OUT"
 
 # Librerías (solo funciones, sin shebang)
-cat "$ROOT_DIR/lib/validations.sh" >> "$OUT"
-echo >> "$OUT"
-cat "$ROOT_DIR/lib/cloudinit.sh" >> "$OUT"
-echo >> "$OUT"
-cat "$ROOT_DIR/lib/extra_disks.sh" >> "$OUT"
-echo >> "$OUT"
-cat "$ROOT_DIR/lib/espera.sh" >> "$OUT"
-echo >> "$OUT"
+for lib in "${LIBS[@]}"; do
+    cat "$ROOT_DIR/lib/$lib.sh" >> "$OUT"
+    echo >> "$OUT"
+done
 
 # Script principal, sin shebang, sin 'set -euo pipefail' y sin 'source ...'
 grep -vE '^#!/bin/bash|^set -euo pipefail|^source ' \

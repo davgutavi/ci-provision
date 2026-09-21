@@ -1,0 +1,71 @@
+#!/bin/bash
+# virt-install simulado para los tests locales (sin libvirt).
+# Crea el dominio en $MOCK_STATE/dominios/NOMBRE con lo que le llega.
+#
+#   MOCK_VIRT_INSTALL_FALLA=1   falla sin crear nada, como si libvirt diera error
+
+S="${MOCK_STATE:?MOCK_STATE no definido}"
+mkdir -p "$S/dominios"
+echo "virt-install $*" >> "$S/log"
+
+if [[ -n "${MOCK_VIRT_INSTALL_FALLA:-}" ]]; then
+    echo "ERROR    error simulado de virt-install" >&2
+    exit 1
+fi
+
+nombre=""
+discos=()
+netcfg=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --name)   nombre="$2"; shift 2 ;;
+        --disk)
+            d="${2#path=}"
+            discos+=( "${d%%,*}" )
+            shift 2 ;;
+        --cloud-init)
+            IFS=, read -r -a partes <<< "$2"
+            for p in "${partes[@]}"; do
+                [[ "$p" == network-config=* ]] && netcfg="${p#network-config=}"
+            done
+            shift 2 ;;
+        --ram|--vcpus|--os-variant|--network|--graphics) shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+if [[ -z "$nombre" ]]; then
+    echo "ERROR    falta --name" >&2
+    exit 1
+fi
+
+if [[ -d "$S/dominios/$nombre" ]]; then
+    echo "ERROR    Guest name '$nombre' is already in use." >&2
+    exit 1
+fi
+
+for d in "${discos[@]}"; do
+    if [[ ! -f "$d" ]]; then
+        echo "ERROR    el disco no existe: $d" >&2
+        exit 1
+    fi
+done
+
+dir="$S/dominios/$nombre"
+mkdir -p "$dir"
+echo "running" > "$dir/estado"
+printf '%s\n' "${discos[@]}" > "$dir/discos"
+touch "$dir/iso"
+
+# IP: la fija del network-config, o una "de DHCP"
+ip=""
+if [[ -n "$netcfg" && -f "$netcfg" ]]; then
+    ip="$(sed -n 's/^ *- \([0-9.]*\)\/[0-9]*$/\1/p' "$netcfg" | head -n1)"
+fi
+if [[ -z "$ip" ]]; then
+    n="$(ls "$S/dominios" | wc -l | tr -d ' ')"
+    ip="$(cat "$S/dhcp_base" 2>/dev/null || echo 192.168.7).$(( 200 + n ))"
+fi
+echo "$ip" > "$dir/ip"
+
+exit 0

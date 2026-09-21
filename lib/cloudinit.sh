@@ -10,6 +10,7 @@
 # Expulsando el medio en cuanto la máquina está configurada, las instantáneas
 # que tome después el alumno ya no pueden heredar el problema.
 ########################################
+
 # Devuelve la unidad que tiene enganchada la ISO de cloud-init, mirando tanto
 # la definición activa como la persistente. Cadena vacía si no hay ninguna.
 cloudinit_unidad() {
@@ -45,9 +46,9 @@ eject_cloudinit_media() {
 
     # Lo que decide es el estado final, no el código de salida de los intentos.
     if [[ -z "$(cloudinit_unidad "$vm")" ]]; then
-        echo "✔ Medio de cloud-init expulsado (unidad ${unidad}): ya puedes tomar instantáneas."
+        echo "✔ Medio de cloud-init expulsado de $vm: ya puedes tomar instantáneas."
     else
-        echo "AVISO: no se ha podido expulsar el medio de cloud-init de la unidad ${unidad}." >&2
+        echo "AVISO: no se ha podido expulsar el medio de cloud-init de $vm (unidad ${unidad})." >&2
         echo "       Apaga la máquina antes de tomar instantáneas y, si el revert falla," >&2
         echo "       consulta el apartado B.6 del manual." >&2
     fi
@@ -55,17 +56,28 @@ eject_cloudinit_media() {
 
 ########################################
 # Generación de ficheros cloud-init
+#
+#   generar_cloudinit DOMINIO HOSTNAME IP MODO
+#
+#   MODO:
+#     normal   máquina corriente
+#     gluster  nodo GlusterFS suelto, o base del clúster: instala
+#              glusterfs-server y xfsprogs, habilita glusterd y resetea el
+#              machine-id para que las copias sean máquinas distintas
+#     nodo     nodo del clúster, creado a partir de la base: ya tiene todo
+#              instalado; solo se personaliza (IP, /etc/hosts, discos xfs)
+#
+# Deja las rutas en WORKDIR, USER_DATA, META_DATA y NETWORK_DATA (vacío si DHCP).
 ########################################
-generate_cloudinit_files() {
-    local vm="$1"
-    local host="$2"
+generar_cloudinit() {
+    local vm="$1" host="$2" ip="$3" modo="$4"
 
     # En modo simulación se usa un directorio aparte, para no sobrescribir los
     # ficheros de una máquina que ya exista.
     if $DRY_RUN; then
-        WORKDIR="./cloudinit-${vm}.dry-run"
+        WORKDIR="${SILO_DIR}/cloudinit-${vm}.dry-run"
     else
-        WORKDIR="./cloudinit-${vm}"
+        WORKDIR="${SILO_DIR}/cloudinit-${vm}"
     fi
 
     rm -rf "$WORKDIR"
@@ -77,9 +89,14 @@ generate_cloudinit_files() {
 
     USER_DATA="$WORKDIR/cip-user.yaml"
     META_DATA="$WORKDIR/cip-meta.yaml"
+    NETWORK_DATA=""
 
     ########################################
     # meta-data
+    #
+    # El instance-id importa: cloud-init vuelve a configurar una máquina
+    # cuando ve uno distinto del que tenía. Así se personalizan los nodos del
+    # clúster, que parten de un disco ya configurado.
     ########################################
     cat > "$META_DATA" <<EOF
 instance-id: ${vm}
@@ -87,23 +104,11 @@ local-hostname: ${host}
 EOF
 
     ########################################
-    # Construcción de lista de contraseñas
-    ########################################
-    local chpass_list=""
-    local ssh_pwauth=false
-
-    if [[ -n "$USER_PASS" ]]; then
-        chpass_list+="administrador:${USER_PASS}"$'\n'
-        ssh_pwauth=true
-    fi
-
-    if $ENABLE_ROOT; then
-        chpass_list+="root:s1st3mas"$'\n'
-    fi
-
-    ########################################
     # user-data
     ########################################
+    local pass_admin="${SSH_PASS:-$PASS_CONSOLA}"
+    local i
+
     {
         echo "#cloud-config"
         echo "users:"
@@ -114,42 +119,78 @@ EOF
         echo "    ssh-authorized-keys:"
         echo "      - $(cat "$PUBKEY_PATH")"
 
-        if [[ -n "$chpass_list" ]]; then
-            if $ssh_pwauth; then
-                echo "ssh_pwauth: true"
-            fi
-            echo "chpasswd:"
-            echo "  list: |"
-            while IFS= read -r line; do
-                [[ -n "$line" ]] && echo "    $line"
-            done <<< "$chpass_list"
-            echo "  expire: false"
+        # Contraseñas de consola (root solo entra por consola: sshd de Debian
+        # trae PermitRootLogin prohibit-password)
+        echo "chpasswd:"
+        echo "  list: |"
+        echo "    administrador:${pass_admin}"
+        echo "    root:${PASS_CONSOLA}"
+        echo "  expire: false"
+
+        # SSH por contraseña solo si el alumno lo pide explícitamente. Se fija
+        # también el 'false' para no depender del valor por defecto de la imagen.
+        if [[ -n "$SSH_PASS" ]]; then
+            echo "ssh_pwauth: true"
+        else
+            echo "ssh_pwauth: false"
         fi
 
-        echo "package_update: true"
-        echo "packages:"
-        echo "  - qemu-guest-agent"
-        if $GLUSTERFS; then
-            echo "  - glusterfs-server"
-        fi
+        case "$modo" in
+            normal|gluster)
+                echo "package_update: true"
+                echo "packages:"
+                echo "  - qemu-guest-agent"
+                if [[ "$modo" == "gluster" ]]; then
+                    echo "  - glusterfs-server"
+                    # Necesario para que los nodos del clúster puedan formatear
+                    # sus discos en xfs en el primer arranque
+                    echo "  - xfsprogs"
+                fi
+                ;;
+            nodo)
+                # La base ya tiene todo instalado: no hace falta tocar apt
+                echo "package_update: false"
 
-        # El orden de runcmd importa: el script espera a que el guest agent
-        # responda para dar la máquina por lista, así que su arranque va lo
-        # más tarde posible. De este modo, que el agente conteste implica que
-        # los paquetes están instalados y que el resto de runcmd ya se ejecutó.
+                # Resolución por nombre entre los nodos (apartado A.3.2)
+                echo "write_files:"
+                echo "  - path: /etc/hosts"
+                echo "    content: |"
+                echo "      127.0.0.1 localhost"
+                echo "      127.0.1.1 ${host}"
+                for i in "${!CLUSTER_NODOS[@]}"; do
+                    echo "      ${CLUSTER_IPS[$i]} ${CLUSTER_NODOS[$i]}"
+                done
+                echo "      ::1 localhost ip6-localhost ip6-loopback"
+                echo "      ff02::1 ip6-allnodes"
+                echo "      ff02::2 ip6-allrouters"
+
+                # Discos vdb, vdc y vdd formateados en xfs y montados por fstab.
+                # Los discos deben estar conectados desde el primer arranque:
+                # por eso se pasan a virt-install en vez de añadirlos después.
+                echo "fs_setup:"
+                for i in "${!CLUSTER_MONTAJES[@]}"; do
+                    echo "  - device: /dev/${UNIDADES_CLUSTER[$i]}"
+                    echo "    filesystem: xfs"
+                    echo "    partition: none"
+                    echo "    overwrite: false"
+                done
+                echo "mounts:"
+                for i in "${!CLUSTER_MONTAJES[@]}"; do
+                    echo "  - [/dev/${UNIDADES_CLUSTER[$i]}, ${CLUSTER_MONTAJES[$i]}, xfs, 'defaults,nofail', '0', '0']"
+                done
+                ;;
+        esac
+
         echo "runcmd:"
         echo "  - timedatectl set-timezone Europe/Madrid"
-
-        if $GLUSTERFS; then
-            # Solo habilitamos glusterd (no se arranca, solo enable)
+        if [[ "$modo" == "gluster" ]]; then
+            # Solo se habilita glusterd, no se arranca: así no genera su UUID en
+            # la base, y cada copia tendrá el suyo cuando arranque
             echo "  - systemctl enable glusterd"
         fi
-
         echo "  - systemctl start qemu-guest-agent"
-
-        if $GLUSTERFS; then
-            # Reset de machine-id para poder clonar sin conflictos. Va después
-            # del arranque del agente para no operar sobre un machine-id vacío.
+        if [[ "$modo" == "gluster" ]]; then
+            # machine-id vacío: cada copia de este disco generará el suyo
             echo "  - truncate -s 0 /etc/machine-id"
         fi
     } > "$USER_DATA"
@@ -158,12 +199,12 @@ EOF
 
     ########################################
     # network-config (solo si IP estática)
-    ########################################
+    #
     # La pasarela y el prefijo se toman de la configuración real de la red
-    # (ver load_network_info), no de una suposición sobre la IP indicada.
-    # Se usa la forma 'routes:' en lugar de la obsoleta 'gateway4:' para que
-    # coincida con la plantilla que se enseña en el manual de laboratorio.
-    if [[ -n "$IP" ]]; then
+    # (ver load_network_info). Se usa la forma 'routes:' en lugar de la
+    # obsoleta 'gateway4:' para que coincida con la plantilla del manual.
+    ########################################
+    if [[ -n "$ip" ]]; then
         NETWORK_DATA="$WORKDIR/cip-net.yaml"
 
         cat > "$NETWORK_DATA" <<EOF
@@ -171,7 +212,7 @@ version: 2
 ethernets:
   enp1s0:
     addresses:
-      - ${IP}/${NET_PREFIX}
+      - ${ip}/${NET_PREFIX}
     routes:
       - to: default
         via: ${NET_GATEWAY}
@@ -181,7 +222,5 @@ ethernets:
         - 150.214.130.15
 EOF
         chmod 600 "$NETWORK_DATA"
-    else
-        NETWORK_DATA=""
     fi
 }

@@ -1,0 +1,200 @@
+#!/bin/bash
+# virsh simulado para los tests locales (sin libvirt).
+#
+# Guarda su estado en el directorio $MOCK_STATE:
+#   redes.txt            nombres de las redes, uno por línea
+#   red-NOMBRE.xml       definición de cada red
+#   red-NOMBRE.inactiva  si existe, la red está inactiva
+#   dominios/NOMBRE/     un directorio por dominio (los crea virt-install)
+#   log                  todas las invocaciones, para que los tests las comprueben
+#
+# Comportamiento ajustable con variables de entorno:
+#   MOCK_AGENT_DELAY=N       el agente no responde en las N primeras consultas
+#   MOCK_CI_RUNNING=N        'cloud-init status' devuelve running N veces antes de done
+#   MOCK_CI_RESULT=done|error  estado final de cloud-init
+#   MOCK_EXEC_UNSUPPORTED=1  qemu-agent-command falla siempre
+#   MOCK_SHUTDOWN_NUNCA=1    'virsh shutdown' nunca llega a apagar la máquina
+
+S="${MOCK_STATE:?MOCK_STATE no definido}"
+mkdir -p "$S/dominios"
+echo "virsh $*" >> "$S/log"
+
+#   MOCK_SIN_LIBVIRT=1       no hay conexión con libvirt: todo falla
+if [[ -n "${MOCK_SIN_LIBVIRT:-}" ]]; then
+    echo "error: failed to connect to the hypervisor" >&2
+    exit 1
+fi
+
+cmd="${1:-}"
+shift || true
+
+dom_dir() { echo "$S/dominios/$1"; }
+existe_dominio() { [[ -d "$(dom_dir "$1")" ]]; }
+contador() {   # contador NOMBRE FICHERO → incrementa y devuelve el valor
+    local f="$(dom_dir "$1")/$2" n=0
+    [[ -f "$f" ]] && n="$(cat "$f")"
+    n=$(( n + 1 ))
+    echo "$n" > "$f"
+    echo "$n"
+}
+
+case "$cmd" in
+    version)
+        echo "Compiled against library: libvirt 8.0.0 (simulado)"
+        exit 0 ;;
+
+    list)
+        ls "$S/dominios" 2>/dev/null
+        exit 0 ;;
+
+    dominfo)
+        if existe_dominio "$1"; then
+            echo "Name:           $1"
+            echo "State:          $(cat "$(dom_dir "$1")/estado")"
+            exit 0
+        fi
+        echo "error: failed to get domain '$1'" >&2
+        exit 1 ;;
+
+    net-list)
+        cat "$S/redes.txt" 2>/dev/null
+        exit 0 ;;
+
+    net-info)
+        if [[ ! -f "$S/red-$1.xml" ]]; then
+            echo "error: failed to get network '$1'" >&2
+            exit 1
+        fi
+        activa=yes
+        [[ -f "$S/red-$1.inactiva" ]] && activa=no
+        printf 'Name:           %s\nUUID:           00000000-0000-0000-0000-000000000000\nActive:         %s\n' "$1" "$activa"
+        exit 0 ;;
+
+    net-dumpxml)
+        if [[ -f "$S/red-$1.xml" ]]; then
+            cat "$S/red-$1.xml"
+            exit 0
+        fi
+        echo "error: failed to get network '$1'" >&2
+        exit 1 ;;
+
+    domstate)
+        existe_dominio "$1" || { echo "error: failed to get domain '$1'" >&2; exit 1; }
+        cat "$(dom_dir "$1")/estado"
+        exit 0 ;;
+
+    shutdown)
+        existe_dominio "$1" || { echo "error: failed to get domain '$1'" >&2; exit 1; }
+        if [[ -z "${MOCK_SHUTDOWN_NUNCA:-}" ]]; then
+            echo "shut off" > "$(dom_dir "$1")/estado"
+        fi
+        echo "Domain '$1' is being shutdown"
+        exit 0 ;;
+
+    destroy)
+        existe_dominio "$1" || { echo "error: failed to get domain '$1'" >&2; exit 1; }
+        if [[ "$(cat "$(dom_dir "$1")/estado")" != "running" ]]; then
+            echo "error: Requested operation is not valid: domain is not running" >&2
+            exit 1
+        fi
+        echo "shut off" > "$(dom_dir "$1")/estado"
+        echo "Domain '$1' destroyed"
+        exit 0 ;;
+
+    undefine)
+        existe_dominio "$1" || { echo "error: failed to get domain '$1'" >&2; exit 1; }
+        rm -rf "$(dom_dir "$1")"
+        echo "Domain '$1' has been undefined"
+        exit 0 ;;
+
+    domifaddr)
+        vm="$1"
+        existe_dominio "$vm" || { echo "error: failed to get domain '$vm'" >&2; exit 1; }
+        if [[ "$(cat "$(dom_dir "$vm")/estado")" != "running" ]]; then
+            echo "error: Requested operation is not valid: domain is not running" >&2
+            exit 1
+        fi
+        n="$(contador "$vm" llamadas_agente)"
+        if (( n <= ${MOCK_AGENT_DELAY:-0} )); then
+            echo "error: Guest agent is not responding: QEMU guest agent is not connected" >&2
+            exit 1
+        fi
+        ip="$(cat "$(dom_dir "$vm")/ip")"
+        printf ' Name       MAC address          Protocol     Address\n'
+        printf -- '-------------------------------------------------------------------------------\n'
+        printf ' lo         00:00:00:00:00:00    ipv4         127.0.0.1/8\n'
+        printf ' -          -                    ipv6         ::1/128\n'
+        printf ' enp1s0     52:54:00:aa:bb:cc    ipv4         %s/24\n' "$ip"
+        printf ' -          -                    ipv6         fe80::5054:ff:feaa:bbcc/64\n'
+        exit 0 ;;
+
+    domblklist)
+        vm="$1"
+        existe_dominio "$vm" || { echo "error: failed to get domain '$vm'" >&2; exit 1; }
+        inactive=false
+        [[ "${2:-}" == "--inactive" ]] && inactive=true
+        printf ' Target   Source\n'
+        printf -- '-----------------------------------------------------\n'
+        i=0
+        while IFS= read -r d; do
+            [[ -z "$d" ]] && continue
+            printf ' vd%s      %s\n' "$(printf "\\$(printf '%03o' $(( 97 + i )))")" "$d"
+            i=$(( i + 1 ))
+        done < "$(dom_dir "$vm")/discos"
+        # Como en los servidores reales: la definición persistente ya no tiene
+        # la ISO, pero la activa sí hasta que se expulsa
+        if $inactive || [[ ! -f "$(dom_dir "$vm")/iso" ]]; then
+            printf ' sda      -\n'
+        else
+            printf ' sda      /var/lib/libvirt/boot/virtinst-xxxxxx-cloudinit.iso\n'
+        fi
+        exit 0 ;;
+
+    change-media)
+        vm="$1"
+        existe_dominio "$vm" || { echo "error: failed to get domain '$vm'" >&2; exit 1; }
+        if [[ "$*" == *--config* ]]; then
+            echo "error: The disk device 'sda' doesn't have media" >&2
+            exit 1
+        fi
+        if [[ -f "$(dom_dir "$vm")/iso" ]]; then
+            rm -f "$(dom_dir "$vm")/iso"
+            echo "Successfully ejected media."
+            exit 0
+        fi
+        echo "error: The disk device 'sda' doesn't have media" >&2
+        exit 1 ;;
+
+    qemu-agent-command)
+        vm="$1"
+        existe_dominio "$vm" || { echo "error: failed to get domain '$vm'" >&2; exit 1; }
+        if [[ -n "${MOCK_EXEC_UNSUPPORTED:-}" ]]; then
+            echo "error: internal error: unable to execute QEMU agent command 'guest-exec': The command has been disabled for this instance" >&2
+            exit 1
+        fi
+        if [[ "$(cat "$(dom_dir "$vm")/estado")" != "running" ]]; then
+            echo "error: Requested operation is not valid: domain is not running" >&2
+            exit 1
+        fi
+        json="${*: -1}"
+        case "$json" in
+            *guest-exec-status*)
+                n="$(contador "$vm" llamadas_exec)"
+                if (( n <= ${MOCK_CI_RUNNING:-0} )); then
+                    estado="running"
+                else
+                    estado="${MOCK_CI_RESULT:-done}"
+                fi
+                datos="$(printf 'status: %s\n' "$estado" | base64 | tr -d '\n')"
+                printf '{"return":{"exited":true,"exitcode":0,"out-data":"%s"}}\n' "$datos"
+                exit 0 ;;
+            *guest-exec*)
+                printf '{"return":{"pid":4242}}\n'
+                exit 0 ;;
+        esac
+        echo "error: comando de agente no soportado por el mock: $json" >&2
+        exit 1 ;;
+esac
+
+echo "error: mock virsh: subcomando no soportado '$cmd'" >&2
+exit 1
