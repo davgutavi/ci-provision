@@ -35,6 +35,7 @@ CLUSTER_IP_INICIAL=10                             # server1 = .10, server2 = .11
 CLUSTER_RAM_MB=1024                               # recursos por nodo: los mismos que
 CLUSTER_VCPUS=1                                   # usa crea-entorno.sh
 CLUSTER_MONTAJES=(/gluster1 /gluster2 /gluster3)  # vdb, vdc y vdd, formateados en xfs
+OPCIONES_FSTAB_CLUSTER="auto,async,nofail"        # las mismas líneas de fstab que muestra el manual
 
 # Recursos por defecto de una máquina suelta
 RAM_MB_DEFECTO=2048
@@ -197,12 +198,14 @@ Parámetros:
 
 Opciones:
   --extra-disks        Crea y conecta 6 discos extra de ${TAM_DISCO_EXTRA} (vdb..vdg)
-  --glusterfs          Prepara la máquina como nodo GlusterFS (glusterfs-server
-                       instalado, glusterd habilitado, machine-id reseteado)
-  --gluster-cluster    Construye la infraestructura completa del apartado A.3.2
-                       del manual: una base GlusterFS y ${#CLUSTER_NODOS[@]} nodos
-                       (${CLUSTER_NODOS[*]}) con IP fija, /etc/hosts, ${#UNIDADES_CLUSTER[@]} discos
-                       cada uno y ${CLUSTER_MONTAJES[*]} en xfs. No lleva MAQUINA.
+  --glusterfs          Construye una imagen base GlusterFS: crea la máquina con
+                       glusterfs-server instalado, glusterd habilitado y el
+                       machine-id vacío y, al terminar, la apaga y elimina el
+                       dominio. Queda solo MAQUINA.qcow2, listo para hacer copias.
+  --gluster-cluster    Construye la infraestructura completa del epígrafe 2.4 del
+                       boletín 2: la base anterior y ${#CLUSTER_NODOS[@]} nodos (${CLUSTER_NODOS[*]})
+                       con IP fija, /etc/hosts, ${#UNIDADES_CLUSTER[@]} discos cada uno y
+                       ${CLUSTER_MONTAJES[*]} en xfs. No lleva MAQUINA.
   --limpiar            Si ya existen los dominios o discos que el script va a
                        crear, los elimina antes (solo esos; nada más)
   --red NOMBRE         Red virtual a usar (por defecto se busca ${USUARIO}-red)
@@ -211,18 +214,19 @@ Opciones:
   --ram MB             Memoria (por defecto ${RAM_MB_DEFECTO}; en el clúster, ${CLUSTER_RAM_MB} por nodo)
   --vcpus N            vCPUs (por defecto ${VCPUS_DEFECTO}; en el clúster, ${CLUSTER_VCPUS} por nodo)
   --ssh-pass CONTRASEÑA
-                       Permite entrar por SSH con contraseña, además de con clave.
-                       La contraseña la eliges tú (solo caracteres ASCII).
+                       Da esa contraseña a 'administrador' y permite entrar por SSH
+                       escribiéndola (sin --ssh-pass, por SSH solo se entra con tu
+                       clave pública). Solo caracteres ASCII.
   --dry-run            Comprueba los datos y muestra lo que se haría, SIN crear nada
   --no-wait            No esperar a que cloud-init termine de configurar la máquina
   -h, --help           Muestra esta ayuda
 
 En todas las máquinas:
-  - Usuario 'administrador' con tu clave pública ($PUBKEY_PATH),
-    sudo sin contraseña y contraseña de consola '${PASS_CONSOLA}'.
-  - Usuario 'root' habilitado solo por consola, contraseña '${PASS_CONSOLA}'.
+  - Usuario 'administrador' con tu clave pública ($PUBKEY_PATH) y
+    sudo sin contraseña. Sin contraseña propia salvo que uses --ssh-pass.
+  - Usuario 'root' con contraseña '${PASS_CONSOLA}', solo para la consola
+    (virsh console o virt-viewer); por SSH no puede entrar.
   - Consola gráfica activa (virt-viewer).
-  - Por SSH se entra con clave; con contraseña solo si usas --ssh-pass.
 
 Ejemplos:
   $0 server1                              # DHCP
@@ -294,6 +298,11 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
     ########################################
     # Parámetros posicionales
     ########################################
+    if $GLUSTERFS && $NO_WAIT; then
+        error 10 "--no-wait no se puede combinar con --glusterfs: la base hay que apagarla
+cuando cloud-init termine, así que es imprescindible esperar."
+    fi
+
     if $CLUSTER; then
         if (( ${#args[@]} > 0 )); then
             error 10 "Con --gluster-cluster no se indica MAQUINA ni IP: los nombres (${CLUSTER_BASE}, ${CLUSTER_NODOS[*]}) y las IPs (.${CLUSTER_IP_INICIAL} en adelante) son fijos."
@@ -519,9 +528,27 @@ print_summary() {
     if [[ -n "$SSH_PASS" ]]; then
         echo "                                        (o con la contraseña: $SSH_PASS)"
     fi
-    echo "  virsh console $VM_NAME"
-    echo "      administrador o root, contraseña: $PASS_CONSOLA"
+    echo "  virsh console $VM_NAME        root, contraseña: $PASS_CONSOLA"
     echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system $VM_NAME"
+    echo "-------------------------------------------"
+}
+
+########################################
+# Resumen final de una base GlusterFS (--glusterfs)
+########################################
+print_summary_base() {
+    echo "-------------------------------------------"
+    echo "Imagen base GlusterFS lista"
+    echo
+    echo "Disco        : $DISCO_MAIN ($TAM_DISCO)"
+    echo "Contenido    : Debian 12 con glusterfs-server y xfsprogs instalados,"
+    echo "               glusterd habilitado, zona horaria Europe/Madrid y machine-id vacío"
+    echo "Dominio      : $VM_NAME se ha eliminado; solo queda el disco"
+    echo
+    echo "Úsalo como respaldo de las copias COW de tus nodos, por ejemplo:"
+    echo "  qemu-img create -f qcow2 -b $(basename "$DISCO_MAIN") -F qcow2 server1.qcow2 40G"
+    echo
+    echo "IMPORTANTE: no borres ni modifiques $(basename "$DISCO_MAIN") mientras existan copias de él."
     echo "-------------------------------------------"
 }
 
@@ -579,7 +606,20 @@ ejecutar_maquina() {
         echo
         imprimir_comando
         echo
+        if $GLUSTERFS; then
+            echo "Al terminar cloud-init, la máquina se apagaría y se eliminaría el dominio,"
+            echo "dejando solo $(basename "$DISCO_MAIN") como imagen base."
+            echo
+        fi
         echo "No se ha creado ni modificado ninguna máquina, disco ni red."
+        return 0
+    fi
+
+    # Base GlusterFS: se construye, se apaga y se elimina el dominio
+    if $GLUSTERFS; then
+        crear_base_gluster "$VM_NAME" "$HOST_NAME" "$DISCO_MAIN"
+        CREACION_COMPLETA=true
+        print_summary_base
         return 0
     fi
 
@@ -604,7 +644,7 @@ ejecutar_maquina() {
     if $NO_WAIT; then
         echo "Omitiendo la espera (--no-wait activo)."
         echo "NOTA: la máquina sigue configurándose por dentro. No se expulsa el medio de"
-        echo "      cloud-init; si vas a tomar instantáneas, apágala antes (apartado B.6 del manual)."
+        echo "      cloud-init; si vas a tomar instantáneas, apágala antes."
     else
         # Solo se expulsa el medio de cloud-init si consta que la máquina ya
         # terminó de configurarse: hacerlo antes podría interrumpir a cloud-init.

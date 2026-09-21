@@ -215,8 +215,8 @@ fase_b() {
         en_vm_es "$ip" "qemu-guest-agent activo"         "active"        systemctl is-active qemu-guest-agent
         en_vm_es "$ip" "zona horaria Europe/Madrid"      "Europe/Madrid" timedatectl show -p Timezone --value
         en_vm_es "$ip" "sshd: SSH por contraseña desactivado" "passwordauthentication no" "sudo sshd -T | grep -i '^passwordauthentication'"
-        en_vm_es "$ip" "administrador tiene contraseña de consola" "P" "sudo passwd -S administrador | awk '{print \$2}'"
-        en_vm_es "$ip" "root tiene contraseña de consola"          "P" "sudo passwd -S root | awk '{print \$2}'"
+        en_vm_es "$ip" "administrador sin contraseña propia" "sin-contraseña" "sudo passwd -S administrador | awk '{print (\$2==\"P\")?\"con-contraseña\":\"sin-contraseña\"}'"
+        en_vm_es "$ip" "root tiene contraseña de consola"    "P"              "sudo passwd -S root | awk '{print \$2}'"
         en_vm_es "$ip" "sudo sin contraseña"             "root"          sudo id -un
         info "Comprobación manual pendiente: 'virsh console ${USUARIO}-pruebas1' y entrar como root / s1st3mas"
     fi
@@ -259,21 +259,18 @@ fase_b() {
         info "Comprobación manual pendiente: 'ssh -o PubkeyAuthentication=no administrador@$ip' con la contraseña Prueba123"
     fi
 
-    # ---------- B4: --glusterfs ----------
+    # ---------- B4: --glusterfs (imagen base: al final solo queda el disco) ----------
     titulo "B4: pruebasgluster con --glusterfs"
     inicio=$SECONDS
     salida="$(bash "$SCRIPT" --glusterfs pruebasgluster 2>&1)"; rc=$?
     echo "$salida" >> "$LOG"
     info "tiempo total: $(( SECONDS - inicio ))s"
-    [[ $rc == 0 ]] && ok "termina con código 0" || ko "código $rc"
-    ip="$(ip_del_resumen "$salida")"
-    if [[ -n "$ip" ]]; then
-        en_vm_es "$ip" "glusterd habilitado"   "enabled"  systemctl is-enabled glusterd
-        en_vm_es "$ip" "glusterd no arrancado" "inactive" systemctl is-active glusterd
-        en_vm_es "$ip" "xfsprogs instalado"    "install ok installed" "dpkg-query -W -f='\${Status}' xfsprogs"
-        en_vm_es "$ip" "machine-id vacío"      "0"        "wc -c < /etc/machine-id"
-        en_vm_es "$ip" "cloud-init terminado"  "status: done" cloud-init status
-    fi
+    [[ $rc == 0 ]] && ok "termina con código 0" || { ko "código $rc"; echo "$salida" | tail -8 | sed 's/^/    | /'; }
+    grep -q "operativa tras" <<< "$salida" && ok "espera a que cloud-init termine" || ko "no esperó"
+    grep -q "Imagen base GlusterFS lista" <<< "$salida" && ok "resumen de imagen base" || ko "sin resumen de base"
+    comprueba "el dominio se ha eliminado" bash -c "! virsh dominfo ${USUARIO}-pruebasgluster >/dev/null 2>&1"
+    comprueba "el disco base se conserva, COW de debian12.qcow2" bash -c "[ \"\$(qemu-img info -U --output=json '$SILO/pruebasgluster.qcow2' | jq -r '.\"backing-filename\"')\" = debian12.qcow2 ]"
+    info "el contenido de la base (glusterd, xfsprogs, machine-id) se comprueba en la fase C, dentro de los nodos"
 
     if [[ -z "${CONSERVAR:-}" ]]; then
         elimina_maquina pruebas1
@@ -338,6 +335,8 @@ fase_c() {
         en_vm_es "$ip" "hostname"                    "$h"           hostname
         en_vm_es "$ip" "cloud-init terminado"        "status: done" cloud-init status
         en_vm_es "$ip" "3 montajes xfs en /gluster*" "3"            "mount -t xfs | grep -c ' /gluster[123] '"
+        en_vm_es "$ip" "fstab con las líneas del manual" "3"         "grep -c '^/dev/vd[bcd] /gluster[123] xfs auto,async,nofail 0 0$' /etc/fstab"
+        en_vm_es "$ip" "xfsprogs instalado"          "install ok installed" "dpkg-query -W -f='\${Status}' xfsprogs"
         en_vm_es "$ip" "8 discos dentro de la máquina" "8"          "lsblk -dn -o NAME | grep -c '^vd'"
         en_vm_es "$ip" "vde sin formatear"           ""             "lsblk -no FSTYPE /dev/vde"
         en_vm_es "$ip" "resuelve server1..4 por /etc/hosts" "4"     "getent hosts server1 server2 server3 server4 | wc -l"

@@ -49,8 +49,7 @@ eject_cloudinit_media() {
         echo "✔ Medio de cloud-init expulsado de $vm: ya puedes tomar instantáneas."
     else
         echo "AVISO: no se ha podido expulsar el medio de cloud-init de $vm (unidad ${unidad})." >&2
-        echo "       Apaga la máquina antes de tomar instantáneas y, si el revert falla," >&2
-        echo "       consulta el apartado B.6 del manual." >&2
+        echo "       Apaga la máquina antes de tomar instantáneas." >&2
     fi
 }
 
@@ -106,7 +105,6 @@ EOF
     ########################################
     # user-data
     ########################################
-    local pass_admin="${SSH_PASS:-$PASS_CONSOLA}"
     local i
 
     {
@@ -119,11 +117,16 @@ EOF
         echo "    ssh-authorized-keys:"
         echo "      - $(cat "$PUBKEY_PATH")"
 
-        # Contraseñas de consola (root solo entra por consola: sshd de Debian
-        # trae PermitRootLogin prohibit-password)
+        # root tiene contraseña para poder entrar por consola (por SSH no
+        # entra: sshd de Debian trae PermitRootLogin prohibit-password).
+        # 'administrador' solo la tiene si se pide --ssh-pass; si no, entra
+        # únicamente por SSH con su clave, igual que en las máquinas que se
+        # crean a mano siguiendo el manual.
         echo "chpasswd:"
         echo "  list: |"
-        echo "    administrador:${pass_admin}"
+        if [[ -n "$SSH_PASS" ]]; then
+            echo "    administrador:${SSH_PASS}"
+        fi
         echo "    root:${PASS_CONSOLA}"
         echo "  expire: false"
 
@@ -167,9 +170,12 @@ EOF
                 echo "      ff02::1 ip6-allnodes"
                 echo "      ff02::2 ip6-allrouters"
 
-                # Discos vdb, vdc y vdd formateados en xfs y montados por fstab.
-                # Los discos deben estar conectados desde el primer arranque:
-                # por eso se pasan a virt-install en vez de añadirlos después.
+                # Discos vdb, vdc y vdd formateados en xfs. Deben estar
+                # conectados desde el primer arranque: por eso se pasan a
+                # virt-install en vez de añadirlos después. El montaje va en
+                # runcmd (más abajo) para que las líneas de /etc/fstab sean
+                # exactamente las que muestran los ejercicios del manual; el
+                # módulo 'mounts' de cloud-init las escribiría a su manera.
                 echo "fs_setup:"
                 for i in "${!CLUSTER_MONTAJES[@]}"; do
                     echo "  - device: /dev/${UNIDADES_CLUSTER[$i]}"
@@ -177,14 +183,17 @@ EOF
                     echo "    partition: none"
                     echo "    overwrite: false"
                 done
-                echo "mounts:"
-                for i in "${!CLUSTER_MONTAJES[@]}"; do
-                    echo "  - [/dev/${UNIDADES_CLUSTER[$i]}, ${CLUSTER_MONTAJES[$i]}, xfs, 'defaults,nofail', '0', '0']"
-                done
                 ;;
         esac
 
         echo "runcmd:"
+        if [[ "$modo" == "nodo" ]]; then
+            echo "  - mkdir -p ${CLUSTER_MONTAJES[*]}"
+            for i in "${!CLUSTER_MONTAJES[@]}"; do
+                echo "  - echo '/dev/${UNIDADES_CLUSTER[$i]} ${CLUSTER_MONTAJES[$i]} xfs ${OPCIONES_FSTAB_CLUSTER} 0 0' >> /etc/fstab"
+            done
+            echo "  - mount -a"
+        fi
         echo "  - timedatectl set-timezone Europe/Madrid"
         if [[ "$modo" == "gluster" ]]; then
             # Solo se habilita glusterd, no se arranca: así no genera su UUID en

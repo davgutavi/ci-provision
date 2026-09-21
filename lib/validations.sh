@@ -135,8 +135,7 @@ Consulta las redes disponibles con: virsh net-list --all"
                 elegida="${candidatas[0]}"
             elif (( ${#candidatas[@]} == 0 )); then
                 error 40 "No encuentro ninguna red virtual con tu nombre de usuario ('$USUARIO').
-Crea tu red virtual según el apartado 5.2 del manual, con el nombre '${USUARIO}-red',
-o indica cuál usar con: --red NOMBRE
+Crea tu red virtual con el nombre '${USUARIO}-red', o indica cuál usar con: --red NOMBRE
 Redes existentes: virsh net-list --all"
             else
                 error 44 "Hay varias redes virtuales con tu nombre de usuario: ${candidatas[*]}
@@ -362,7 +361,7 @@ descargar_imagen_base() {
         curl -fL --progress-bar -o "$tmp" "$BASE_IMG_URL" || rc=$?
     else
         error 38 "No hay ni wget ni curl para descargar la imagen base.
-Descárgala tú en el silo con el nombre $(basename "$BASE_IMG") (apartado 5.3.1 del manual)."
+Descárgala tú en el silo con el nombre $(basename "$BASE_IMG")."
     fi
 
     if (( rc != 0 )); then
@@ -428,7 +427,7 @@ validar_entorno() {
     # Silo existente
     if [[ ! -d "$SILO_DIR" ]]; then
         error 30 "No existe el silo en: $SILO_DIR
-Créalo según el apartado 5.1 del manual."
+Crea ese directorio y mapéalo como silo en el hipervisor."
     fi
 
     # Clave pública existente

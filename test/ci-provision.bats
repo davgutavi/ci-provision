@@ -246,7 +246,8 @@ qinfo() {
     definir_red "${USUARIO}x-red" 192.168.9.1 255.255.255.0 192.168.9.128 192.168.9.254
     run bash "$SCRIPT" --dry-run server1
     assert_failure 40
-    assert_output --partial "apartado 5.2"
+    assert_output --partial "${USUARIO}-red"
+    assert_output --partial "--red NOMBRE"
 }
 
 @test "--red con una red inexistente: error 40" {
@@ -377,12 +378,12 @@ qinfo() {
     assert_output --partial "virsh console ${USUARIO}-server1"
 }
 
-@test "user-data por defecto: contraseñas de consola, SSH solo por clave, sin GlusterFS" {
+@test "user-data por defecto: root con contraseña de consola, administrador sin ella, SSH solo por clave" {
     run bash "$SCRIPT" server1
     assert_success
     local u="$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
     grep -q "^#cloud-config" "$u"
-    grep -q "administrador:s1st3mas" "$u"
+    ! grep -q "administrador:" "$u"
     grep -q "root:s1st3mas" "$u"
     grep -q "^ssh_pwauth: false" "$u"
     grep -q "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC0falsa" "$u"
@@ -427,7 +428,7 @@ qinfo() {
     assert_output --partial "Discos extra : vdb..vdg"
 }
 
-@test "--glusterfs: paquetes y orden de runcmd" {
+@test "--glusterfs: paquetes, orden de runcmd, y al final solo queda el disco" {
     run bash "$SCRIPT" --glusterfs glusterbase
     assert_success
     local u="$SILO/cloudinit-${USUARIO}-glusterbase/cip-user.yaml"
@@ -437,6 +438,27 @@ qinfo() {
     local runcmd
     runcmd="$(sed -n '/^runcmd:/,$p' "$u" | tr '\n' ' ')"
     [[ "$runcmd" == *"systemctl enable glusterd"*"systemctl start qemu-guest-agent"*"truncate -s 0 /etc/machine-id"* ]]
+
+    # Se espera, se apaga y se elimina el dominio; el disco se conserva
+    [ "$(llamadas 'domifaddr')" -ge 1 ]
+    [ "$(llamadas "shutdown ${USUARIO}-glusterbase")" -eq 1 ]
+    [ "$(llamadas "undefine ${USUARIO}-glusterbase")" -eq 1 ]
+    ! dominio_existe "${USUARIO}-glusterbase"
+    [ "$(qinfo "$SILO/glusterbase.qcow2" '."backing-filename"')" = "debian12.qcow2" ]
+    assert_output --partial "Imagen base GlusterFS lista"
+    assert_output --partial "qemu-img create -f qcow2 -b glusterbase.qcow2"
+}
+
+@test "--glusterfs no admite --no-wait" {
+    run bash "$SCRIPT" --no-wait --glusterfs glusterbase
+    assert_failure 10
+}
+
+@test "--glusterfs: si cloud-init falla, error 71 y no queda ni disco ni dominio" {
+    MOCK_CI_RESULT=error run bash "$SCRIPT" --glusterfs glusterbase
+    assert_failure 71
+    ! dominio_existe "${USUARIO}-glusterbase"
+    [ ! -e "$SILO/glusterbase.qcow2" ]
 }
 
 @test "--disco y --tam cambian el nombre y el tamaño del disco principal" {
@@ -622,7 +644,11 @@ qinfo() {
     grep -q "device: /dev/vdd" "$un"
     ! grep -q "device: /dev/vde" "$un"
     grep -q "filesystem: xfs" "$un"
-    grep -q "/dev/vdc, /gluster2, xfs" "$un"
+    # fstab con las mismas líneas que muestra el manual, y montaje en runcmd
+    grep -q "/dev/vdc /gluster2 xfs auto,async,nofail 0 0' >> /etc/fstab" "$un"
+    grep -q "mkdir -p /gluster1 /gluster2 /gluster3" "$un"
+    grep -q -- "- mount -a" "$un"
+    ! grep -q "^mounts:" "$un"
     grep -q "instance-id: ${USUARIO}-server2" "$SILO/cloudinit-${USUARIO}-server2/cip-meta.yaml"
     grep -q -- "- 192.168.7.11/24" "$SILO/cloudinit-${USUARIO}-server2/cip-net.yaml"
 

@@ -138,8 +138,7 @@ Consulta las redes disponibles con: virsh net-list --all"
                 elegida="${candidatas[0]}"
             elif (( ${#candidatas[@]} == 0 )); then
                 error 40 "No encuentro ninguna red virtual con tu nombre de usuario ('$USUARIO').
-Crea tu red virtual según el apartado 5.2 del manual, con el nombre '${USUARIO}-red',
-o indica cuál usar con: --red NOMBRE
+Crea tu red virtual con el nombre '${USUARIO}-red', o indica cuál usar con: --red NOMBRE
 Redes existentes: virsh net-list --all"
             else
                 error 44 "Hay varias redes virtuales con tu nombre de usuario: ${candidatas[*]}
@@ -365,7 +364,7 @@ descargar_imagen_base() {
         curl -fL --progress-bar -o "$tmp" "$BASE_IMG_URL" || rc=$?
     else
         error 38 "No hay ni wget ni curl para descargar la imagen base.
-Descárgala tú en el silo con el nombre $(basename "$BASE_IMG") (apartado 5.3.1 del manual)."
+Descárgala tú en el silo con el nombre $(basename "$BASE_IMG")."
     fi
 
     if (( rc != 0 )); then
@@ -431,7 +430,7 @@ validar_entorno() {
     # Silo existente
     if [[ ! -d "$SILO_DIR" ]]; then
         error 30 "No existe el silo en: $SILO_DIR
-Créalo según el apartado 5.1 del manual."
+Crea ese directorio y mapéalo como silo en el hipervisor."
     fi
 
     # Clave pública existente
@@ -593,8 +592,7 @@ eject_cloudinit_media() {
         echo "✔ Medio de cloud-init expulsado de $vm: ya puedes tomar instantáneas."
     else
         echo "AVISO: no se ha podido expulsar el medio de cloud-init de $vm (unidad ${unidad})." >&2
-        echo "       Apaga la máquina antes de tomar instantáneas y, si el revert falla," >&2
-        echo "       consulta el apartado B.6 del manual." >&2
+        echo "       Apaga la máquina antes de tomar instantáneas." >&2
     fi
 }
 
@@ -650,7 +648,6 @@ EOF
     ########################################
     # user-data
     ########################################
-    local pass_admin="${SSH_PASS:-$PASS_CONSOLA}"
     local i
 
     {
@@ -663,11 +660,16 @@ EOF
         echo "    ssh-authorized-keys:"
         echo "      - $(cat "$PUBKEY_PATH")"
 
-        # Contraseñas de consola (root solo entra por consola: sshd de Debian
-        # trae PermitRootLogin prohibit-password)
+        # root tiene contraseña para poder entrar por consola (por SSH no
+        # entra: sshd de Debian trae PermitRootLogin prohibit-password).
+        # 'administrador' solo la tiene si se pide --ssh-pass; si no, entra
+        # únicamente por SSH con su clave, igual que en las máquinas que se
+        # crean a mano siguiendo el manual.
         echo "chpasswd:"
         echo "  list: |"
-        echo "    administrador:${pass_admin}"
+        if [[ -n "$SSH_PASS" ]]; then
+            echo "    administrador:${SSH_PASS}"
+        fi
         echo "    root:${PASS_CONSOLA}"
         echo "  expire: false"
 
@@ -711,9 +713,12 @@ EOF
                 echo "      ff02::1 ip6-allnodes"
                 echo "      ff02::2 ip6-allrouters"
 
-                # Discos vdb, vdc y vdd formateados en xfs y montados por fstab.
-                # Los discos deben estar conectados desde el primer arranque:
-                # por eso se pasan a virt-install en vez de añadirlos después.
+                # Discos vdb, vdc y vdd formateados en xfs. Deben estar
+                # conectados desde el primer arranque: por eso se pasan a
+                # virt-install en vez de añadirlos después. El montaje va en
+                # runcmd (más abajo) para que las líneas de /etc/fstab sean
+                # exactamente las que muestran los ejercicios del manual; el
+                # módulo 'mounts' de cloud-init las escribiría a su manera.
                 echo "fs_setup:"
                 for i in "${!CLUSTER_MONTAJES[@]}"; do
                     echo "  - device: /dev/${UNIDADES_CLUSTER[$i]}"
@@ -721,14 +726,17 @@ EOF
                     echo "    partition: none"
                     echo "    overwrite: false"
                 done
-                echo "mounts:"
-                for i in "${!CLUSTER_MONTAJES[@]}"; do
-                    echo "  - [/dev/${UNIDADES_CLUSTER[$i]}, ${CLUSTER_MONTAJES[$i]}, xfs, 'defaults,nofail', '0', '0']"
-                done
                 ;;
         esac
 
         echo "runcmd:"
+        if [[ "$modo" == "nodo" ]]; then
+            echo "  - mkdir -p ${CLUSTER_MONTAJES[*]}"
+            for i in "${!CLUSTER_MONTAJES[@]}"; do
+                echo "  - echo '/dev/${UNIDADES_CLUSTER[$i]} ${CLUSTER_MONTAJES[$i]} xfs ${OPCIONES_FSTAB_CLUSTER} 0 0' >> /etc/fstab"
+            done
+            echo "  - mount -a"
+        fi
         echo "  - timedatectl set-timezone Europe/Madrid"
         if [[ "$modo" == "gluster" ]]; then
             # Solo se habilita glusterd, no se arranca: así no genera su UUID en
@@ -1068,6 +1076,47 @@ objetivos_cluster() {
     done
 }
 
+########################################
+# Base GlusterFS: crea la máquina, espera a que cloud-init termine, la apaga
+# y elimina el dominio. Queda solo el disco, listo para hacer copias COW.
+# Es lo que describen los pasos 3 a 5 del procedimiento del apéndice A.3.2,
+# y lo usan tanto --glusterfs como la fase 1 de --gluster-cluster.
+#   crear_base_gluster DOMINIO HOSTNAME DISCO
+########################################
+crear_base_gluster() {
+    local vm="$1" host="$2" disco="$3"
+
+    generar_cloudinit "$vm" "$host" "" gluster
+    construir_comando "$vm" "$RAM_MB" "$VCPUS" "$disco"
+
+    echo "→ Creando el disco $(basename "$disco") (copia COW de $(basename "$BASE_IMG"), $TAM_DISCO)…"
+    crear_disco_cow "$disco" "$BASE_IMG" "$TAM_DISCO"
+
+    echo "→ Creando la máquina '$vm' con cloud-init…"
+    crear_dominio "$vm"
+
+    if ! esperar_maquinas "$vm"; then
+        error 70 "La máquina '$vm' no ha terminado de configurarse en ${WAIT_TIMEOUT}s.
+Sin eso no puede servir de base. Comprueba la carga del servidor y vuelve a intentarlo."
+    fi
+
+    if [[ "${ESTADO_CI[$vm]}" == "error" ]]; then
+        error 71 "cloud-init ha terminado con errores en '$vm' (probablemente al instalar
+glusterfs-server). Las copias heredarían el problema, así que se detiene aquí.
+Puedes verlo con: virsh console $vm  (root, contraseña ${PASS_CONSOLA}) y cloud-init status --long"
+    fi
+
+    echo "→ Apagando '$vm'…"
+    if ! apagar_maquina "$vm"; then
+        error 70 "La máquina '$vm' no se ha apagado en ${SHUTDOWN_TIMEOUT}s."
+    fi
+
+    # El dominio sobra: el disco se queda como respaldo de las copias
+    virsh undefine "$vm" --snapshots-metadata >/dev/null
+    quitar_dominio_creado "$vm"
+    echo "✔ Base lista: $(basename "$disco") (el dominio '$vm' se ha eliminado; el disco se conserva)."
+}
+
 mostrar_plan_cluster() {
     local base_vm="${USUARIO}-${CLUSTER_BASE}"
     local base_disco="${SILO_DIR}/${CLUSTER_BASE}.qcow2"
@@ -1119,7 +1168,7 @@ mostrar_plan_cluster() {
 print_summary_cluster() {
     local i host vm ip
     echo "-------------------------------------------"
-    echo "Infraestructura GlusterFS creada (apartado A.3.2 del manual)"
+    echo "Infraestructura GlusterFS creada (boletín 2, epígrafe 2.4)"
     echo
     echo "Red          : $NET_NAME"
     echo "Nodos        :"
@@ -1140,8 +1189,7 @@ print_summary_cluster() {
     if [[ -n "$SSH_PASS" ]]; then
         echo "                                        (o con la contraseña: $SSH_PASS)"
     fi
-    echo "  virsh console ${USUARIO}-server1"
-    echo "      administrador o root, contraseña: $PASS_CONSOLA"
+    echo "  virsh console ${USUARIO}-server1        root, contraseña: $PASS_CONSOLA"
     echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system ${USUARIO}-server1"
     echo
     echo "IMPORTANTE: no borres ${SILO_DIR}/${CLUSTER_BASE}.qcow2."
@@ -1167,35 +1215,7 @@ ejecutar_cluster() {
     # Fase 1: base
     ########################################
     echo "═══ Fase 1 de 2: base GlusterFS ($base_vm) ═══"
-    generar_cloudinit "$base_vm" "$CLUSTER_BASE" "" gluster
-    construir_comando "$base_vm" "$RAM_MB" "$VCPUS" "$base_disco"
-
-    echo "→ Creando el disco $(basename "$base_disco") (copia COW de $(basename "$BASE_IMG"), $TAM_DISCO)…"
-    crear_disco_cow "$base_disco" "$BASE_IMG" "$TAM_DISCO"
-
-    echo "→ Creando la máquina '$base_vm' con cloud-init…"
-    crear_dominio "$base_vm"
-
-    if ! esperar_maquinas "$base_vm"; then
-        error 70 "La base '$base_vm' no ha terminado de configurarse en ${WAIT_TIMEOUT}s.
-Sin ella no se pueden crear los nodos. Comprueba la carga del servidor y vuelve a intentarlo."
-    fi
-
-    if [[ "${ESTADO_CI[$base_vm]}" == "error" ]]; then
-        error 71 "cloud-init ha terminado con errores en la base '$base_vm' (probablemente al
-instalar glusterfs-server). Los nodos heredarían el problema, así que se detiene aquí.
-Puedes verlo con: virsh console $base_vm  (root, contraseña ${PASS_CONSOLA}) y cloud-init status --long"
-    fi
-
-    echo "→ Apagando la base…"
-    if ! apagar_maquina "$base_vm"; then
-        error 70 "La base '$base_vm' no se ha apagado en ${SHUTDOWN_TIMEOUT}s."
-    fi
-
-    # El dominio de la base sobra; su disco se queda como respaldo de los nodos
-    virsh undefine "$base_vm" --snapshots-metadata >/dev/null
-    quitar_dominio_creado "$base_vm"
-    echo "✔ Base lista: $(basename "$base_disco") (dominio eliminado; el disco se conserva)."
+    crear_base_gluster "$base_vm" "$CLUSTER_BASE" "$base_disco"
     echo
 
     ########################################
@@ -1280,6 +1300,7 @@ CLUSTER_IP_INICIAL=10                             # server1 = .10, server2 = .11
 CLUSTER_RAM_MB=1024                               # recursos por nodo: los mismos que
 CLUSTER_VCPUS=1                                   # usa crea-entorno.sh
 CLUSTER_MONTAJES=(/gluster1 /gluster2 /gluster3)  # vdb, vdc y vdd, formateados en xfs
+OPCIONES_FSTAB_CLUSTER="auto,async,nofail"        # las mismas líneas de fstab que muestra el manual
 
 # Recursos por defecto de una máquina suelta
 RAM_MB_DEFECTO=2048
@@ -1436,12 +1457,14 @@ Parámetros:
 
 Opciones:
   --extra-disks        Crea y conecta 6 discos extra de ${TAM_DISCO_EXTRA} (vdb..vdg)
-  --glusterfs          Prepara la máquina como nodo GlusterFS (glusterfs-server
-                       instalado, glusterd habilitado, machine-id reseteado)
-  --gluster-cluster    Construye la infraestructura completa del apartado A.3.2
-                       del manual: una base GlusterFS y ${#CLUSTER_NODOS[@]} nodos
-                       (${CLUSTER_NODOS[*]}) con IP fija, /etc/hosts, ${#UNIDADES_CLUSTER[@]} discos
-                       cada uno y ${CLUSTER_MONTAJES[*]} en xfs. No lleva MAQUINA.
+  --glusterfs          Construye una imagen base GlusterFS: crea la máquina con
+                       glusterfs-server instalado, glusterd habilitado y el
+                       machine-id vacío y, al terminar, la apaga y elimina el
+                       dominio. Queda solo MAQUINA.qcow2, listo para hacer copias.
+  --gluster-cluster    Construye la infraestructura completa del epígrafe 2.4 del
+                       boletín 2: la base anterior y ${#CLUSTER_NODOS[@]} nodos (${CLUSTER_NODOS[*]})
+                       con IP fija, /etc/hosts, ${#UNIDADES_CLUSTER[@]} discos cada uno y
+                       ${CLUSTER_MONTAJES[*]} en xfs. No lleva MAQUINA.
   --limpiar            Si ya existen los dominios o discos que el script va a
                        crear, los elimina antes (solo esos; nada más)
   --red NOMBRE         Red virtual a usar (por defecto se busca ${USUARIO}-red)
@@ -1450,18 +1473,19 @@ Opciones:
   --ram MB             Memoria (por defecto ${RAM_MB_DEFECTO}; en el clúster, ${CLUSTER_RAM_MB} por nodo)
   --vcpus N            vCPUs (por defecto ${VCPUS_DEFECTO}; en el clúster, ${CLUSTER_VCPUS} por nodo)
   --ssh-pass CONTRASEÑA
-                       Permite entrar por SSH con contraseña, además de con clave.
-                       La contraseña la eliges tú (solo caracteres ASCII).
+                       Da esa contraseña a 'administrador' y permite entrar por SSH
+                       escribiéndola (sin --ssh-pass, por SSH solo se entra con tu
+                       clave pública). Solo caracteres ASCII.
   --dry-run            Comprueba los datos y muestra lo que se haría, SIN crear nada
   --no-wait            No esperar a que cloud-init termine de configurar la máquina
   -h, --help           Muestra esta ayuda
 
 En todas las máquinas:
-  - Usuario 'administrador' con tu clave pública ($PUBKEY_PATH),
-    sudo sin contraseña y contraseña de consola '${PASS_CONSOLA}'.
-  - Usuario 'root' habilitado solo por consola, contraseña '${PASS_CONSOLA}'.
+  - Usuario 'administrador' con tu clave pública ($PUBKEY_PATH) y
+    sudo sin contraseña. Sin contraseña propia salvo que uses --ssh-pass.
+  - Usuario 'root' con contraseña '${PASS_CONSOLA}', solo para la consola
+    (virsh console o virt-viewer); por SSH no puede entrar.
   - Consola gráfica activa (virt-viewer).
-  - Por SSH se entra con clave; con contraseña solo si usas --ssh-pass.
 
 Ejemplos:
   $0 server1                              # DHCP
@@ -1533,6 +1557,11 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
     ########################################
     # Parámetros posicionales
     ########################################
+    if $GLUSTERFS && $NO_WAIT; then
+        error 10 "--no-wait no se puede combinar con --glusterfs: la base hay que apagarla
+cuando cloud-init termine, así que es imprescindible esperar."
+    fi
+
     if $CLUSTER; then
         if (( ${#args[@]} > 0 )); then
             error 10 "Con --gluster-cluster no se indica MAQUINA ni IP: los nombres (${CLUSTER_BASE}, ${CLUSTER_NODOS[*]}) y las IPs (.${CLUSTER_IP_INICIAL} en adelante) son fijos."
@@ -1758,9 +1787,27 @@ print_summary() {
     if [[ -n "$SSH_PASS" ]]; then
         echo "                                        (o con la contraseña: $SSH_PASS)"
     fi
-    echo "  virsh console $VM_NAME"
-    echo "      administrador o root, contraseña: $PASS_CONSOLA"
+    echo "  virsh console $VM_NAME        root, contraseña: $PASS_CONSOLA"
     echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system $VM_NAME"
+    echo "-------------------------------------------"
+}
+
+########################################
+# Resumen final de una base GlusterFS (--glusterfs)
+########################################
+print_summary_base() {
+    echo "-------------------------------------------"
+    echo "Imagen base GlusterFS lista"
+    echo
+    echo "Disco        : $DISCO_MAIN ($TAM_DISCO)"
+    echo "Contenido    : Debian 12 con glusterfs-server y xfsprogs instalados,"
+    echo "               glusterd habilitado, zona horaria Europe/Madrid y machine-id vacío"
+    echo "Dominio      : $VM_NAME se ha eliminado; solo queda el disco"
+    echo
+    echo "Úsalo como respaldo de las copias COW de tus nodos, por ejemplo:"
+    echo "  qemu-img create -f qcow2 -b $(basename "$DISCO_MAIN") -F qcow2 server1.qcow2 40G"
+    echo
+    echo "IMPORTANTE: no borres ni modifiques $(basename "$DISCO_MAIN") mientras existan copias de él."
     echo "-------------------------------------------"
 }
 
@@ -1818,7 +1865,20 @@ ejecutar_maquina() {
         echo
         imprimir_comando
         echo
+        if $GLUSTERFS; then
+            echo "Al terminar cloud-init, la máquina se apagaría y se eliminaría el dominio,"
+            echo "dejando solo $(basename "$DISCO_MAIN") como imagen base."
+            echo
+        fi
         echo "No se ha creado ni modificado ninguna máquina, disco ni red."
+        return 0
+    fi
+
+    # Base GlusterFS: se construye, se apaga y se elimina el dominio
+    if $GLUSTERFS; then
+        crear_base_gluster "$VM_NAME" "$HOST_NAME" "$DISCO_MAIN"
+        CREACION_COMPLETA=true
+        print_summary_base
         return 0
     fi
 
@@ -1843,7 +1903,7 @@ ejecutar_maquina() {
     if $NO_WAIT; then
         echo "Omitiendo la espera (--no-wait activo)."
         echo "NOTA: la máquina sigue configurándose por dentro. No se expulsa el medio de"
-        echo "      cloud-init; si vas a tomar instantáneas, apágala antes (apartado B.6 del manual)."
+        echo "      cloud-init; si vas a tomar instantáneas, apágala antes."
     else
         # Solo se expulsa el medio de cloud-init si consta que la máquina ya
         # terminó de configurarse: hacerlo antes podría interrumpir a cloud-init.

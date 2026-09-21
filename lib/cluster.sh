@@ -50,6 +50,47 @@ objetivos_cluster() {
     done
 }
 
+########################################
+# Base GlusterFS: crea la máquina, espera a que cloud-init termine, la apaga
+# y elimina el dominio. Queda solo el disco, listo para hacer copias COW.
+# Es lo que describen los pasos 3 a 5 del procedimiento del apéndice A.3.2,
+# y lo usan tanto --glusterfs como la fase 1 de --gluster-cluster.
+#   crear_base_gluster DOMINIO HOSTNAME DISCO
+########################################
+crear_base_gluster() {
+    local vm="$1" host="$2" disco="$3"
+
+    generar_cloudinit "$vm" "$host" "" gluster
+    construir_comando "$vm" "$RAM_MB" "$VCPUS" "$disco"
+
+    echo "→ Creando el disco $(basename "$disco") (copia COW de $(basename "$BASE_IMG"), $TAM_DISCO)…"
+    crear_disco_cow "$disco" "$BASE_IMG" "$TAM_DISCO"
+
+    echo "→ Creando la máquina '$vm' con cloud-init…"
+    crear_dominio "$vm"
+
+    if ! esperar_maquinas "$vm"; then
+        error 70 "La máquina '$vm' no ha terminado de configurarse en ${WAIT_TIMEOUT}s.
+Sin eso no puede servir de base. Comprueba la carga del servidor y vuelve a intentarlo."
+    fi
+
+    if [[ "${ESTADO_CI[$vm]}" == "error" ]]; then
+        error 71 "cloud-init ha terminado con errores en '$vm' (probablemente al instalar
+glusterfs-server). Las copias heredarían el problema, así que se detiene aquí.
+Puedes verlo con: virsh console $vm  (root, contraseña ${PASS_CONSOLA}) y cloud-init status --long"
+    fi
+
+    echo "→ Apagando '$vm'…"
+    if ! apagar_maquina "$vm"; then
+        error 70 "La máquina '$vm' no se ha apagado en ${SHUTDOWN_TIMEOUT}s."
+    fi
+
+    # El dominio sobra: el disco se queda como respaldo de las copias
+    virsh undefine "$vm" --snapshots-metadata >/dev/null
+    quitar_dominio_creado "$vm"
+    echo "✔ Base lista: $(basename "$disco") (el dominio '$vm' se ha eliminado; el disco se conserva)."
+}
+
 mostrar_plan_cluster() {
     local base_vm="${USUARIO}-${CLUSTER_BASE}"
     local base_disco="${SILO_DIR}/${CLUSTER_BASE}.qcow2"
@@ -101,7 +142,7 @@ mostrar_plan_cluster() {
 print_summary_cluster() {
     local i host vm ip
     echo "-------------------------------------------"
-    echo "Infraestructura GlusterFS creada (apartado A.3.2 del manual)"
+    echo "Infraestructura GlusterFS creada (boletín 2, epígrafe 2.4)"
     echo
     echo "Red          : $NET_NAME"
     echo "Nodos        :"
@@ -122,8 +163,7 @@ print_summary_cluster() {
     if [[ -n "$SSH_PASS" ]]; then
         echo "                                        (o con la contraseña: $SSH_PASS)"
     fi
-    echo "  virsh console ${USUARIO}-server1"
-    echo "      administrador o root, contraseña: $PASS_CONSOLA"
+    echo "  virsh console ${USUARIO}-server1        root, contraseña: $PASS_CONSOLA"
     echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system ${USUARIO}-server1"
     echo
     echo "IMPORTANTE: no borres ${SILO_DIR}/${CLUSTER_BASE}.qcow2."
@@ -149,35 +189,7 @@ ejecutar_cluster() {
     # Fase 1: base
     ########################################
     echo "═══ Fase 1 de 2: base GlusterFS ($base_vm) ═══"
-    generar_cloudinit "$base_vm" "$CLUSTER_BASE" "" gluster
-    construir_comando "$base_vm" "$RAM_MB" "$VCPUS" "$base_disco"
-
-    echo "→ Creando el disco $(basename "$base_disco") (copia COW de $(basename "$BASE_IMG"), $TAM_DISCO)…"
-    crear_disco_cow "$base_disco" "$BASE_IMG" "$TAM_DISCO"
-
-    echo "→ Creando la máquina '$base_vm' con cloud-init…"
-    crear_dominio "$base_vm"
-
-    if ! esperar_maquinas "$base_vm"; then
-        error 70 "La base '$base_vm' no ha terminado de configurarse en ${WAIT_TIMEOUT}s.
-Sin ella no se pueden crear los nodos. Comprueba la carga del servidor y vuelve a intentarlo."
-    fi
-
-    if [[ "${ESTADO_CI[$base_vm]}" == "error" ]]; then
-        error 71 "cloud-init ha terminado con errores en la base '$base_vm' (probablemente al
-instalar glusterfs-server). Los nodos heredarían el problema, así que se detiene aquí.
-Puedes verlo con: virsh console $base_vm  (root, contraseña ${PASS_CONSOLA}) y cloud-init status --long"
-    fi
-
-    echo "→ Apagando la base…"
-    if ! apagar_maquina "$base_vm"; then
-        error 70 "La base '$base_vm' no se ha apagado en ${SHUTDOWN_TIMEOUT}s."
-    fi
-
-    # El dominio de la base sobra; su disco se queda como respaldo de los nodos
-    virsh undefine "$base_vm" --snapshots-metadata >/dev/null
-    quitar_dominio_creado "$base_vm"
-    echo "✔ Base lista: $(basename "$base_disco") (dominio eliminado; el disco se conserva)."
+    crear_base_gluster "$base_vm" "$CLUSTER_BASE" "$base_disco"
     echo
 
     ########################################
