@@ -573,6 +573,7 @@ qinfo() {
     # cloud-init de un nodo: sin apt, con /etc/hosts, xfs y montajes
     local un="$SILO/cloudinit-${USUARIO}-server2/cip-user.yaml"
     grep -q "^package_update: false" "$un"
+    grep -q "^manage_etc_hosts: false" "$un"
     ! grep -q "glusterfs-server" "$un"
     grep -q "192.168.7.10 server1" "$un"
     grep -q "192.168.7.13 server4" "$un"

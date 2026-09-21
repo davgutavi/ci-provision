@@ -94,8 +94,10 @@ elimina_maquina() {
 
 # Pasarela de la red del usuario y una IP libre para las pruebas
 descubrir_red() {
+    # --limpiar en un --dry-run solo enumera: así no estorban los restos de
+    # una ejecución anterior (error 21)
     local salida
-    salida="$(bash "$SCRIPT" --dry-run pruebas1 2>&1)" || {
+    salida="$(bash "$SCRIPT" --dry-run --limpiar pruebas1 2>&1)" || {
         echo "No puedo ni hacer un --dry-run. Salida:"; echo "$salida"; exit 1; }
     RED="$(sed -n 's/^    Red     : \([^ ]*\).*/\1/p' <<< "$salida" | head -1)"
     GW="$(sed -n 's/.*pasarela \([0-9.]*\),.*/\1/p' <<< "$salida" | head -1)"
@@ -144,7 +146,7 @@ fase_a() {
     espera_codigo 42 "IP dentro del rango DHCP"                --dry-run pruebas1 "${GW%.*}.200"
     espera_codigo 10 "--gluster-cluster con MAQUINA"           --dry-run --gluster-cluster pruebas1
     if [[ -n "$IP_LIBRE" ]]; then
-        espera_codigo 0 "--dry-run con IP libre y discos extra" --dry-run --extra-disks pruebas1 "$IP_LIBRE"
+        espera_codigo 0 "--dry-run con IP libre y discos extra" --dry-run --limpiar --extra-disks pruebas1 "$IP_LIBRE"
     fi
     espera_codigo 0  "--dry-run --limpiar --gluster-cluster (solo enumera)" --dry-run --limpiar --gluster-cluster
 

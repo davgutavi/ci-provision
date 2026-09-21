@@ -643,7 +643,10 @@ EOF
                 # La base ya tiene todo instalado: no hace falta tocar apt
                 echo "package_update: false"
 
-                # Resolución por nombre entre los nodos (apartado A.3.2)
+                # Resolución por nombre entre los nodos (apartado A.3.2).
+                # Se fija manage_etc_hosts a false para que cloud-init no
+                # regenere /etc/hosts en cada arranque y pise lo escrito aquí.
+                echo "manage_etc_hosts: false"
                 echo "write_files:"
                 echo "  - path: /etc/hosts"
                 echo "    content: |"
