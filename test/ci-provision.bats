@@ -55,7 +55,7 @@ qinfo() {
 @test "las opciones antiguas dan error 12 y explican el cambio" {
     run bash "$SCRIPT" --enable-root server1
     assert_failure 12
-    assert_output --partial "root está siempre habilitado"
+    assert_output --partial "--no-root"
 
     run bash "$SCRIPT" --virt-viewer server1
     assert_failure 12
@@ -339,7 +339,7 @@ qinfo() {
 
 @test "--dry-run con --limpiar solo enumera lo que se eliminaría" {
     touch "$SILO/server1.qcow2"
-    run bash "$SCRIPT" --dry-run --limpiar server1
+    run bash "$SCRIPT" --dry-run --limpiar server1 </dev/null
     assert_success
     assert_output --partial "no se elimina nada"
     [ -e "$SILO/server1.qcow2" ]
@@ -391,6 +391,33 @@ qinfo() {
     ! grep -q "glusterfs-server" "$u"
     grep -q "instance-id: ${USUARIO}-server1" "$SILO/cloudinit-${USUARIO}-server1/cip-meta.yaml"
     grep -q "local-hostname: server1" "$SILO/cloudinit-${USUARIO}-server1/cip-meta.yaml"
+}
+
+@test "--no-root: root sin contraseña; sin --ssh-pass no hay chpasswd" {
+    run bash "$SCRIPT" --no-root server1
+    assert_success
+    local u="$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
+    ! grep -q "root:" "$u"
+    ! grep -q "chpasswd" "$u"
+    assert_output --partial "root sin contraseña"
+}
+
+@test "--no-root con --ssh-pass: solo administrador tiene contraseña" {
+    run bash "$SCRIPT" --no-root --ssh-pass MiPass1 server1
+    assert_success
+    local u="$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
+    grep -q "administrador:MiPass1" "$u"
+    ! grep -q "root:" "$u"
+}
+
+@test "--base en una máquina suelta: copia COW de esa imagen, sin descargar nada" {
+    qemu-img create -f qcow2 "$SILO/mibase.qcow2" 3G >/dev/null
+    rm -f "$SILO/debian12.qcow2"
+    run bash "$SCRIPT" --base mibase.qcow2 server1 192.168.7.10
+    assert_success
+    [ "$(qinfo "$SILO/server1.qcow2" '."backing-filename"')" = "mibase.qcow2" ]
+    [ "$(llamadas '^wget')" -eq 0 ]
+    assert_output --partial "copia COW de mibase.qcow2"
 }
 
 @test "--ssh-pass activa el SSH por contraseña con la contraseña elegida" {
@@ -512,7 +539,7 @@ qinfo() {
     touch "$SILO/otro.qcow2" "$SILO/server2.qcow2"
     : > "$MOCK_STATE/log"
 
-    run bash "$SCRIPT" --limpiar --extra-disks server1
+    run bash "$SCRIPT" --limpiar --extra-disks server1 </dev/null
     assert_success
     assert_output --partial "--limpiar: se van a eliminar"
     [ "$(llamadas "undefine ${USUARIO}-server1")" -eq 1 ]
@@ -668,9 +695,42 @@ qinfo() {
     assert_output --partial "server3-vdh.qcow2"
     [ "$(llamadas '^virt-install')" -eq 0 ]
 
-    run bash "$SCRIPT" --limpiar --gluster-cluster
+    run bash "$SCRIPT" --limpiar --gluster-cluster </dev/null
     assert_success
     [ "$(llamadas '^virt-install')" -eq 5 ]
+}
+
+@test "clúster con --base: se omite la fase 1 y --limpiar no toca la imagen base" {
+    qemu-img create -f qcow2 -b debian12.qcow2 -F qcow2 "$SILO/mibase.qcow2" 40G >/dev/null
+    touch "$SILO/server2.qcow2"
+    run bash "$SCRIPT" --limpiar --gluster-cluster --base mibase.qcow2 </dev/null
+    assert_success
+    assert_output --partial "Fase 1 de 2: se omite"
+    refute_output --partial "Creando la máquina '${USUARIO}-glusterbase'"
+    [ "$(llamadas '^virt-install')" -eq 4 ]
+    [ -e "$SILO/mibase.qcow2" ]
+    [ ! -e "$SILO/glusterbase.qcow2" ]
+    local h
+    for h in server1 server2 server3 server4; do
+        [ "$(qinfo "$SILO/$h.qcow2" '."backing-filename"')" = "mibase.qcow2" ]
+    done
+    assert_output --partial "no borres $SILO/mibase.qcow2"
+}
+
+@test "clúster con --base inexistente o que no es qcow2: error 39" {
+    run bash "$SCRIPT" --dry-run --gluster-cluster --base noexiste.qcow2
+    assert_failure 39
+    echo "hola" > "$SILO/rota.qcow2"
+    run bash "$SCRIPT" --dry-run --gluster-cluster --base rota.qcow2
+    assert_failure 39
+}
+
+@test "--base no puede ser uno de los discos que se van a crear" {
+    qemu-img create -f qcow2 "$SILO/server1.qcow2" 1G >/dev/null
+    run bash "$SCRIPT" --dry-run --gluster-cluster --base server1.qcow2
+    assert_failure 10
+    run bash "$SCRIPT" --dry-run --base server1.qcow2 server1
+    assert_failure 10
 }
 
 @test "clúster: si las IPs .10-.13 caen en el DHCP de la red, error 42 antes de crear nada" {

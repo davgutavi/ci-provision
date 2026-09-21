@@ -65,6 +65,8 @@ TAM_DISCO="$TAM_DISCO_DEFECTO"
 RAM_OPT=""
 VCPUS_OPT=""
 SSH_PASS=""
+NO_ROOT=false      # --no-root: root sin contraseña, como en las máquinas hechas a mano
+BASE_OPT=""        # --base: imagen del silo de la que hacer la copia COW
 
 MAQUINA=""
 IP=""
@@ -206,8 +208,15 @@ Opciones:
                        boletín 2: la base anterior y ${#CLUSTER_NODOS[@]} nodos (${CLUSTER_NODOS[*]})
                        con IP fija, /etc/hosts, ${#UNIDADES_CLUSTER[@]} discos cada uno y
                        ${CLUSTER_MONTAJES[*]} en xfs. No lleva MAQUINA.
+  --base FICHERO       Imagen del silo de la que hacer la copia COW, en lugar de
+                       debian12.qcow2 (p.ej. una imagen base GlusterFS que ya
+                       tengas). Con --gluster-cluster se omite la fase 1 y los
+                       nodos parten de ella.
+  --no-root            No habilita al usuario root (queda sin contraseña, como en
+                       las máquinas que se crean a mano)
   --limpiar            Si ya existen los dominios o discos que el script va a
-                       crear, los elimina antes (solo esos; nada más)
+                       crear, los elimina antes (solo esos; nada más), previa
+                       confirmación
   --red NOMBRE         Red virtual a usar (por defecto se busca ${USUARIO}-red)
   --disco NOMBRE       Nombre del disco principal (por defecto MAQUINA.qcow2)
   --tam TAMAÑO         Tamaño del disco principal (por defecto ${TAM_DISCO_DEFECTO})
@@ -225,14 +234,16 @@ En todas las máquinas:
   - Usuario 'administrador' con tu clave pública ($PUBKEY_PATH) y
     sudo sin contraseña. Sin contraseña propia salvo que uses --ssh-pass.
   - Usuario 'root' con contraseña '${PASS_CONSOLA}', solo para la consola
-    (virsh console o virt-viewer); por SSH no puede entrar.
+    (virsh console o virt-viewer); por SSH no puede entrar. Con --no-root,
+    sin contraseña.
   - Consola gráfica activa (virt-viewer).
 
 Ejemplos:
-  $0 server1                              # DHCP
-  $0 --extra-disks server1 192.168.XXX.2  # SERVER1 del apartado A.3.1
-  $0 --glusterfs glusterbase              # un nodo GlusterFS suelto
-  $0 --gluster-cluster                    # infraestructura del apartado A.3.2
+  $0 server1                                    # DHCP
+  $0 --extra-disks server1 192.168.XXX.2        # SERVER1 del boletín 2, epígrafe 2.1
+  $0 --gluster-cluster                          # infraestructura del boletín 2, epígrafe 2.4
+  $0 --glusterfs glusterbase                    # solo la imagen base GlusterFS
+  $0 --gluster-cluster --base glusterbase.qcow2 # la infraestructura a partir de esa imagen
   $0 --dry-run --extra-disks server1 192.168.XXX.2   # solo comprobar
 EOF
 }
@@ -251,13 +262,15 @@ parse_args() {
             --limpiar)         LIMPIAR=true;     shift ;;
             --dry-run)         DRY_RUN=true;     shift ;;
             --no-wait)         NO_WAIT=true;     shift ;;
-            --red|--disco|--tam|--ram|--vcpus|--ssh-pass)
+            --no-root)         NO_ROOT=true;     shift ;;
+            --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass)
                 if [[ $# -lt 2 ]]; then
                     error 11 "Falta el valor de la opción $1"
                 fi
                 case "$1" in
                     --red)      RED_OPT="$2"   ;;
                     --disco)    DISCO_OPT="$2" ;;
+                    --base)     BASE_OPT="$2"  ;;
                     --tam)      TAM_DISCO="$2" ;;
                     --ram)      RAM_OPT="$2"   ;;
                     --vcpus)    VCPUS_OPT="$2" ;;
@@ -271,7 +284,7 @@ parse_args() {
                 ;;
             # Opciones de la versión anterior: se explica qué ha cambiado
             --enable-root)
-                error 12 "La opción --enable-root ya no existe: root está siempre habilitado por consola (contraseña ${PASS_CONSOLA})."
+                error 12 "La opción --enable-root ya no existe: root está habilitado por consola de forma predeterminada (contraseña ${PASS_CONSOLA}); usa --no-root si no lo quieres."
                 ;;
             --virt-viewer)
                 error 12 "La opción --virt-viewer ya no existe: la consola gráfica está siempre activa."
@@ -359,6 +372,13 @@ Solo letras, números y guiones, empezando por letra o número (p.ej. server1, g
 
     if [[ -n "$DISCO_OPT" ]] && ! [[ "$DISCO_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
         error 16 "El nombre de disco '$DISCO_OPT' no es válido. Indica solo el nombre del fichero (sin rutas), p.ej. server1.qcow2."
+    fi
+
+    if [[ -n "$BASE_OPT" ]]; then
+        if ! [[ "$BASE_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            error 16 "El nombre de imagen '$BASE_OPT' (--base) no es válido. Indica solo el nombre del fichero del silo (sin rutas), p.ej. glusterbase.qcow2."
+        fi
+        BASE_IMG="${SILO_DIR}/${BASE_OPT}"
     fi
 
     # La contraseña se teclea en la consola de la máquina virtual, cuyo teclado
@@ -528,7 +548,11 @@ print_summary() {
     if [[ -n "$SSH_PASS" ]]; then
         echo "                                        (o con la contraseña: $SSH_PASS)"
     fi
-    echo "  virsh console $VM_NAME        root, contraseña: $PASS_CONSOLA"
+    if $NO_ROOT; then
+        echo "  virsh console $VM_NAME        (root sin contraseña: --no-root)"
+    else
+        echo "  virsh console $VM_NAME        root, contraseña: $PASS_CONSOLA"
+    fi
     echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system $VM_NAME"
     echo "-------------------------------------------"
 }
@@ -573,6 +597,7 @@ ejecutar_maquina() {
     # Conflictos con lo que ya exista (y --limpiar, si se pidió)
     OBJ_DOMINIOS=( "$VM_NAME" )
     OBJ_FICHEROS=( "$DISCO_MAIN" ${extras[@]+"${extras[@]}"} )
+    comprobar_base_no_objetivo
     comprobar_conflictos
 
     generar_cloudinit "$VM_NAME" "$HOST_NAME" "$IP" "$modo"

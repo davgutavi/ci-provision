@@ -24,8 +24,12 @@ Todas las máquinas que crea tienen:
   elimina su dominio, dejando solo el disco `qcow2` listo para hacer copias.
 - `--gluster-cluster`: construye **toda** la infraestructura del boletín 2, epígrafe 2.4
   (imagen base + `server1`..`server4`) en un solo comando.
+- `--base`: usa como imagen de partida una que ya tengas en el silo (por ejemplo,
+  tu imagen base GlusterFS), en lugar de `debian12.qcow2`.
 - `--ssh-pass`: da una contraseña a `administrador` y permite entrar por SSH escribiéndola,
   en lugar de con tu clave pública.
+- `--no-root`: no habilita al usuario `root` (queda sin contraseña, como en las máquinas
+  que se crean a mano).
 - `--limpiar`: elimina, antes de empezar, las máquinas y discos que el script vaya a crear
   si ya existen de una ejecución anterior.
 
@@ -143,26 +147,28 @@ De `MAQUINA` (por ejemplo `server1`) salen el nombre del dominio en libvirt
 | `--extra-disks` | Crea y conecta 6 discos extra de 40G (`vdb`..`vdg`) |
 | `--glusterfs` | Construye una imagen base GlusterFS y deja solo el disco (ver sección 5) |
 | `--gluster-cluster` | Construye la infraestructura completa del boletín 2, epígrafe 2.4 (ver sección 5) |
+| `--base FICHERO` | Imagen del silo de la que hacer la copia, en lugar de `debian12.qcow2`. Con `--gluster-cluster`, los nodos parten de ella y no se construye la base |
 | `--ssh-pass CONTRASEÑA` | Da esa contraseña a `administrador` y permite entrar por SSH escribiéndola. La eliges tú; solo caracteres ASCII |
-| `--limpiar` | Si ya existen los dominios o discos que el script va a crear, los elimina antes. **Solo esos** |
+| `--no-root` | No habilita al usuario `root` |
+| `--limpiar` | Si ya existen los dominios o discos que el script va a crear, los elimina antes, previa confirmación. **Solo esos** |
 | `-h` | Ayuda |
 
 Hay más opciones para casos particulares en la sección 9, *Opciones avanzadas*.
 
 ### ⏳ Qué pasa al ejecutarlo
 
-Tras crear la máquina, el script **espera a que cloud-init termine** de instalar
-los paquetes y aplicar la configuración; para saberlo, consulta el estado de
-cloud-init dentro de la máquina a través del agente invitado. Suele tardar entre
-uno y tres minutos, y al terminar muestra un resumen con la IP de la máquina.
+Tras crear la máquina, el script **espera a que termine de configurarse por
+dentro** (instalación de paquetes y ajustes iniciales). Suele tardar entre uno y
+tres minutos; mientras tanto verás un contador. Al terminar muestra un resumen con
+los datos de la máquina y su IP.
 
 ### 🧹 Sobre `--limpiar`
 
 El script siempre crea máquinas y discos **nuevos**. Si ya existe alguno de los
 que va a crear, se detiene y te dice cuáles son y cómo eliminarlos. Con
 `--limpiar` los elimina él, pero **únicamente esos**: nunca toca otro dominio ni
-otro fichero de tu silo. Antes de hacerlo enumera lo que va a eliminar y espera
-5 segundos por si quieres cancelar con `Ctrl-C`.
+otro fichero de tu silo. Antes de hacerlo te enseña la lista y te pide
+confirmación por teclado.
 
 ---
 
@@ -261,17 +267,29 @@ dirá. Para que los elimine él:
 ./ci-provision.sh --limpiar --gluster-cluster
 ```
 
-### **Solo la imagen base, para hacer las copias tú**
+### **Si ya tienes tu imagen base y solo quieres los nodos**
+
+Con `--base` no se construye la base: los cuatro nodos se crean directamente
+como copias de la imagen que indiques, que **no se toca** (ni siquiera con
+`--limpiar`). Tarda alrededor de un minuto.
+
+```bash
+./ci-provision.sh --gluster-cluster --base glusterbase.qcow2
+```
+
+### **Solo la imagen base**
 
 ```bash
 ./ci-provision.sh --glusterfs glusterbase
 ```
 
-Deja `glusterbase.qcow2` en el silo, sin máquina. A partir de ahí puedes crear los
-nodos a mano siguiendo los apartados a, b, c y d del epígrafe 2.4 del boletín 2:
+Deja `glusterbase.qcow2` en el silo, sin máquina. Después puedes crear los
+nodos con el comando anterior, o hacerlo tú siguiendo los apartados a, b, c y d
+del epígrafe 2.4 del boletín 2. Para crear una máquina suelta a partir de esa
+imagen también sirve `--base`:
 
 ```bash
-qemu-img create -f qcow2 -b glusterbase.qcow2 -F qcow2 server1.qcow2 40G
+./ci-provision.sh --base glusterbase.qcow2 server1 192.168.XXX.10
 ```
 
 ---
@@ -291,7 +309,7 @@ qemu-img create -f qcow2 -b glusterbase.qcow2 -F qcow2 server1.qcow2 40G
 | Acceso | Requisitos | Estado |
 |--------|------------|--------|
 | SSH | – | ❌ Prohibido |
-| Consola (`virsh console` / virt-viewer) | Ninguno | ✔ contraseña `s1st3mas` |
+| Consola (`virsh console` / virt-viewer) | Ninguno (salvo `--no-root`) | ✔ contraseña `s1st3mas` |
 
 ### Ejemplos
 
@@ -338,10 +356,6 @@ base y cada nodo).
 > el directorio se crea con permisos `700` (solo tú puedes leerlo). Recuerda que
 > el servidor de la asignatura es compartido con el resto de la clase.
 
-Al terminar, el script **expulsa el medio de cloud-init** de la máquina, de modo
-que las instantáneas que tomes después no heredan la referencia a esa ISO temporal
-(que es lo que provoca el error `Cannot access storage file` al revertirlas).
-
 ---
 
 # 8. 🧨 Códigos de error
@@ -354,13 +368,14 @@ que las instantáneas que tomes después no heredan la referencia a esa ISO temp
 | **13** | RAM o vCPUs no válidas | Números; mínimo 512 MB y 1 vCPU |
 | **14** | Contraseña con caracteres no ASCII | Sin tildes ni `ñ`: no podrías teclearla en la consola |
 | **15** | Tamaño de disco no válido | Formato `40G`, `20G`, `512M` |
-| **16** | Nombre de disco no válido | Solo el nombre del fichero, sin rutas |
+| **16** | Nombre de disco o de imagen no válido | Solo el nombre del fichero, sin rutas |
 | **20** | Nombre de máquina no válido | Solo letras, números y guiones |
 | **21** | Ya existe el dominio o algún disco | El mensaje indica cómo eliminarlos, o usa `--limpiar` |
 | **30** | No existe el silo | Crear `$HOME/imagenesMV` y mapearlo en el hipervisor |
 | **31** | No existe la clave pública | `ssh-keygen` |
 | **37** | No se ha podido descargar la imagen base, o la que hay está corrupta | El mensaje indica el `wget` manual, o el `rm` para que el script la vuelva a descargar |
 | **38** | Faltan herramientas (incluido `wget`/`curl` para descargar la imagen) o no hay conexión con libvirt | Avisar al profesor |
+| **39** | La imagen indicada con `--base` no existe o no es un `qcow2` | Revisa el nombre; debe estar en el silo |
 | **40** | No se encuentra tu red virtual | Créala con el nombre `TU_USUARIO-red`, o usa `--red` |
 | **41** | IP no válida o fuera de tu red | El mensaje indica las IPs libres de tu red |
 | **42** | IP ocupada por DHCP o reservada | El mensaje indica las IPs libres de tu red |
@@ -369,15 +384,6 @@ que las instantáneas que tomes después no heredan la referencia a esa ISO temp
 | **45** | Tu red virtual está inactiva | `virsh net-start TU_RED` |
 | **70** | La imagen base GlusterFS no ha terminado o no se ha apagado | Reintentar; revisar la carga del servidor |
 | **71** | cloud-init ha fallado en la imagen base GlusterFS | Revisar con `virsh console` |
-
-> 💡 Los errores **41** y **42** se comprueban contra la configuración real de
-> tu red virtual (pasarela, máscara, rango DHCP y reservas), no contra unos
-> valores fijos. Si tu red no sigue el esquema habitual, el mensaje te dirá
-> cuáles son sus valores reales y qué direcciones te quedan libres.
-
-Si el script se interrumpe por un fallo inesperado (o con `Ctrl-C`) antes de
-terminar de crear las máquinas, deshace lo que había hecho: elimina los dominios
-y los discos creados **en esa ejecución**. Nada que existiera antes se toca.
 
 ---
 
@@ -417,72 +423,11 @@ que nunca sobrescriben los de una máquina que ya exista. Combinado con
 Devuelve el control en cuanto la máquina está creada. Ten en cuenta que entonces
 la máquina **seguirá configurándose por dentro** durante un rato: si entras
 enseguida, puede que los paquetes instalados por cloud-init todavía no estén
-disponibles, y no se expulsa el medio de cloud-init (apaga la máquina antes de
-tomar instantáneas).
+disponibles.
 
 ---
 
-# 10. 🛠️ Desarrollo
-
-> Esta sección es para quien modifique el script. Si eres alumno de la
-> asignatura, no necesitas nada de esto.
-
-El script que se distribuye (`ci-provision.sh`) **se genera**, no se edita a
-mano. El código vive separado en módulos:
-
-```
-src/main.sh          Opciones, flujo principal, rollback y resumen
-lib/validations.sh   Entorno, elección de la red, validación de IPs, imagen base
-lib/limpieza.sh      Conflictos con lo que ya existe y --limpiar
-lib/cloudinit.sh     Ficheros cloud-init y expulsión del medio
-lib/discos.sh        Creación de discos
-lib/espera.sh        Espera a que cloud-init termine
-lib/cluster.sh       Imagen base GlusterFS y --gluster-cluster
-```
-
-Tras modificar cualquiera de ellos, regenera el script distribuible:
-
-```bash
-bash tools/build.sh
-```
-
-### Tests locales (sin libvirt)
-
-Usan [bats](https://github.com/bats-core/bats-core), incluido como submódulo,
-con un `virsh`, un `virt-install` y un `wget` simulados (`test/mocks/`). Clona con:
-
-```bash
-git clone --recurse-submodules https://github.com/davgutavi/ci-provision.git
-```
-
-o, si ya lo habías clonado:
-
-```bash
-git submodule update --init
-```
-
-y ejecuta:
-
-```bash
-test_helper/bats-core/bin/bats test/
-```
-
-Necesitan `qemu-img` y `jq` (en macOS: `brew install qemu jq`).
-
-### Pruebas en un servidor de la asignatura
-
-`tools/pruebas-servidor.sh` ejecuta el script de verdad contra libvirt, por fases:
-
-```bash
-bash tools/pruebas-servidor.sh a       # validaciones: no crea nada
-bash tools/pruebas-servidor.sh b       # crea máquinas sueltas y las comprueba por SSH
-bash tools/pruebas-servidor.sh c       # crea el clúster GlusterFS y lo comprueba
-bash tools/pruebas-servidor.sh todas
-```
-
----
-
-# 11. 👨‍🏫 Autor
+# 10. 👨‍🏫 Autor
 
 **David Gutiérrez Avilés**  
 Profesor Titular de Universidad  

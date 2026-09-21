@@ -36,11 +36,25 @@ discos_extra_nodo() {
     done
 }
 
+# Disco de la imagen base del clúster: la que se construye en la fase 1 o,
+# con --base, una que ya existe en el silo
+disco_base_cluster() {
+    if [[ -n "$BASE_OPT" ]]; then
+        echo "${SILO_DIR}/${BASE_OPT}"
+    else
+        echo "${SILO_DIR}/${CLUSTER_BASE}.qcow2"
+    fi
+}
+
 # Rellena OBJ_DOMINIOS y OBJ_FICHEROS con todo lo que crea el clúster
 objetivos_cluster() {
     local host d
-    OBJ_DOMINIOS=( "${USUARIO}-${CLUSTER_BASE}" )
-    OBJ_FICHEROS=( "${SILO_DIR}/${CLUSTER_BASE}.qcow2" )
+    OBJ_DOMINIOS=()
+    OBJ_FICHEROS=()
+    if [[ -z "$BASE_OPT" ]]; then
+        OBJ_DOMINIOS+=( "${USUARIO}-${CLUSTER_BASE}" )
+        OBJ_FICHEROS+=( "${SILO_DIR}/${CLUSTER_BASE}.qcow2" )
+    fi
     for host in "${CLUSTER_NODOS[@]}"; do
         OBJ_DOMINIOS+=( "${USUARIO}-${host}" )
         OBJ_FICHEROS+=( "${SILO_DIR}/${host}.qcow2" )
@@ -93,8 +107,8 @@ Puedes verlo con: virsh console $vm  (root, contraseña ${PASS_CONSOLA}) y cloud
 
 mostrar_plan_cluster() {
     local base_vm="${USUARIO}-${CLUSTER_BASE}"
-    local base_disco="${SILO_DIR}/${CLUSTER_BASE}.qcow2"
-    local i host vm
+    local base_disco i host vm
+    base_disco="$(disco_base_cluster)"
 
     echo "→ MODO SIMULACIÓN (--dry-run): no se creará nada."
     echo
@@ -109,15 +123,19 @@ mostrar_plan_cluster() {
     avisar_imagen_falta
     echo
 
-    echo "Fase 1: base GlusterFS"
-    echo "    Máquina $base_vm con disco $(basename "$base_disco") (COW de $(basename "$BASE_IMG"), $TAM_DISCO)."
-    echo "    Instala glusterfs-server y xfsprogs, habilita glusterd, vacía el machine-id."
-    echo "    Al terminar se apaga y se elimina el dominio; el disco se conserva como respaldo."
-    generar_cloudinit "$base_vm" "$CLUSTER_BASE" "" gluster
-    construir_comando "$base_vm" "$RAM_MB" "$VCPUS" "$base_disco"
-    echo "    Ficheros cloud-init en $WORKDIR/"
-    echo "    Comando:"
-    imprimir_comando | sed 's/^/    /'
+    if [[ -n "$BASE_OPT" ]]; then
+        echo "Fase 1: se omite. Los nodos partirán de la imagen que ya existe: $(basename "$base_disco")"
+    else
+        echo "Fase 1: base GlusterFS"
+        echo "    Máquina $base_vm con disco $(basename "$base_disco") (COW de $(basename "$BASE_IMG"), $TAM_DISCO)."
+        echo "    Instala glusterfs-server y xfsprogs, habilita glusterd, vacía el machine-id."
+        echo "    Al terminar se apaga y se elimina el dominio; el disco se conserva como respaldo."
+        generar_cloudinit "$base_vm" "$CLUSTER_BASE" "" gluster
+        construir_comando "$base_vm" "$RAM_MB" "$VCPUS" "$base_disco"
+        echo "    Ficheros cloud-init en $WORKDIR/"
+        echo "    Comando:"
+        imprimir_comando | sed 's/^/    /'
+    fi
     echo
 
     echo "Fase 2: ${#CLUSTER_NODOS[@]} nodos, cada uno con ${#UNIDADES_CLUSTER[@]} discos extra de ${TAM_DISCO_EXTRA}"
@@ -140,7 +158,8 @@ mostrar_plan_cluster() {
 }
 
 print_summary_cluster() {
-    local i host vm ip
+    local i host vm ip base_disco
+    base_disco="$(disco_base_cluster)"
     echo "-------------------------------------------"
     echo "Infraestructura GlusterFS creada (boletín 2, epígrafe 2.4)"
     echo
@@ -163,21 +182,26 @@ print_summary_cluster() {
     if [[ -n "$SSH_PASS" ]]; then
         echo "                                        (o con la contraseña: $SSH_PASS)"
     fi
-    echo "  virsh console ${USUARIO}-server1        root, contraseña: $PASS_CONSOLA"
+    if $NO_ROOT; then
+        echo "  virsh console ${USUARIO}-server1        (root sin contraseña: --no-root)"
+    else
+        echo "  virsh console ${USUARIO}-server1        root, contraseña: $PASS_CONSOLA"
+    fi
     echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system ${USUARIO}-server1"
     echo
-    echo "IMPORTANTE: no borres ${SILO_DIR}/${CLUSTER_BASE}.qcow2."
+    echo "IMPORTANTE: no borres $base_disco."
     echo "            Los discos de los ${#CLUSTER_NODOS[@]} nodos dependen de él."
     echo "-------------------------------------------"
 }
 
 ejecutar_cluster() {
     local base_vm="${USUARIO}-${CLUSTER_BASE}"
-    local base_disco="${SILO_DIR}/${CLUSTER_BASE}.qcow2"
-    local i host vm ip disco d
+    local base_disco i host vm ip disco d
     local -a extras nodos_vm=()
+    base_disco="$(disco_base_cluster)"
 
     objetivos_cluster
+    comprobar_base_no_objetivo
     comprobar_conflictos
 
     if $DRY_RUN; then
@@ -188,8 +212,12 @@ ejecutar_cluster() {
     ########################################
     # Fase 1: base
     ########################################
-    echo "═══ Fase 1 de 2: base GlusterFS ($base_vm) ═══"
-    crear_base_gluster "$base_vm" "$CLUSTER_BASE" "$base_disco"
+    if [[ -n "$BASE_OPT" ]]; then
+        echo "═══ Fase 1 de 2: se omite; los nodos parten de $(basename "$base_disco") ═══"
+    else
+        echo "═══ Fase 1 de 2: base GlusterFS ($base_vm) ═══"
+        crear_base_gluster "$base_vm" "$CLUSTER_BASE" "$base_disco"
+    fi
     echo
 
     ########################################

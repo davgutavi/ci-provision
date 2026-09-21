@@ -47,11 +47,17 @@ comprueba() {
     if "$@" >>"$LOG" 2>&1; then ok "$desc"; else ko "$desc"; fi
 }
 
+# Ejecuta el script sin teclado: así --limpiar no pide confirmación (la
+# batería es quien decide) y ninguna orden puede quedarse esperando
+ejecutar_script() {
+    bash "$SCRIPT" "$@" </dev/null
+}
+
 # espera_codigo CODIGO DESCRIPCION ARGS...   ejecuta el script y compara el código
 espera_codigo() {
     local esperado="$1" desc="$2"; shift 2
     local salida rc
-    salida="$(bash "$SCRIPT" "$@" 2>&1)"; rc=$?
+    salida="$(ejecutar_script "$@" 2>&1)"; rc=$?
     printf '\n$ ci-provision.sh %s\n%s\n' "$*" "$salida" >> "$LOG"
     if [[ "$rc" == "$esperado" ]]; then
         ok "[$rc] $desc"
@@ -104,14 +110,14 @@ descubrir_red() {
     # --limpiar en un --dry-run solo enumera: así no estorban los restos de
     # una ejecución anterior (error 21)
     local salida
-    salida="$(bash "$SCRIPT" --dry-run --limpiar pruebas1 2>&1)" || {
+    salida="$(ejecutar_script --dry-run --limpiar pruebas1 2>&1)" || {
         echo "No puedo ni hacer un --dry-run. Salida:"; echo "$salida"; exit 1; }
     RED="$(sed -n 's/^    Red     : \([^ ]*\).*/\1/p' <<< "$salida" | head -1)"
     GW="$(sed -n 's/.*pasarela \([0-9.]*\),.*/\1/p' <<< "$salida" | head -1)"
 
     # Pedimos una IP que no puede ser de ninguna red (203.0.113.0/24 está
     # reservada para documentación): falla con 41 y enumera los bloques libres
-    salida="$(bash "$SCRIPT" --dry-run pruebas1 203.0.113.9 2>&1)"
+    salida="$(ejecutar_script --dry-run pruebas1 203.0.113.9 2>&1)"
     local bloque ini fin
     bloque="$(sed -n '/IPs libres/{n;p;}' <<< "$salida" | head -1)"
     ini="$(awk '{print $1}' <<< "$bloque")"
@@ -166,9 +172,9 @@ fase_a() {
 
     echo
     echo "  Revisa a mano estos dos mensajes (deben citar la pasarela y las IPs libres de TU red):"
-    bash "$SCRIPT" --dry-run pruebas1 "${GW%.*}.200" 2>&1 | sed 's/^/    | /'
+    ejecutar_script --dry-run pruebas1 "${GW%.*}.200" 2>&1 | sed 's/^/    | /'
     echo
-    bash "$SCRIPT" --dry-run --limpiar --gluster-cluster 2>&1 | sed -n '1,/^$/p' | sed 's/^/    | /'
+    ejecutar_script --dry-run --limpiar --gluster-cluster 2>&1 | sed -n '1,/^$/p' | sed 's/^/    | /'
 }
 
 ########################################
@@ -189,7 +195,7 @@ fase_b() {
     # ---------- B1: DHCP ----------
     titulo "B1: pruebas1 con DHCP"
     inicio=$SECONDS
-    salida="$(bash "$SCRIPT" pruebas1 2>&1)"; rc=$?
+    salida="$(ejecutar_script pruebas1 2>&1)"; rc=$?
     echo "$salida" >> "$LOG"
     info "tiempo total: $(( SECONDS - inicio ))s"
     [[ $rc == 0 ]] && ok "termina con código 0" || { ko "código $rc"; echo "$salida" | tail -15 | sed 's/^/    | /'; }
@@ -232,7 +238,7 @@ fase_b() {
     else
         titulo "B2: pruebas1 con IP fija $IP_LIBRE y --extra-disks (con --limpiar)"
         inicio=$SECONDS
-        salida="$(bash "$SCRIPT" --limpiar --extra-disks pruebas1 "$IP_LIBRE" 2>&1)"; rc=$?
+        salida="$(ejecutar_script --limpiar --extra-disks pruebas1 "$IP_LIBRE" 2>&1)"; rc=$?
         echo "$salida" >> "$LOG"
         info "tiempo total: $(( SECONDS - inicio ))s"
         [[ $rc == 0 ]] && ok "termina con código 0" || { ko "código $rc"; echo "$salida" | tail -15 | sed 's/^/    | /'; }
@@ -248,21 +254,23 @@ fase_b() {
         en_vm_es "$IP_LIBRE" "netplan renderizado con routes"   "1" "sudo grep -c 'to: default' /etc/netplan/50-cloud-init.yaml"
     fi
 
-    # ---------- B3: --ssh-pass ----------
-    titulo "B3: pruebas1 con --ssh-pass (con --limpiar)"
-    salida="$(bash "$SCRIPT" --limpiar --ssh-pass Prueba123 pruebas1 2>&1)"; rc=$?
+    # ---------- B3: --ssh-pass y --no-root ----------
+    titulo "B3: pruebas1 con --ssh-pass y --no-root (con --limpiar)"
+    salida="$(ejecutar_script --limpiar --no-root --ssh-pass Prueba123 pruebas1 2>&1)"; rc=$?
     echo "$salida" >> "$LOG"
     [[ $rc == 0 ]] && ok "termina con código 0" || ko "código $rc"
     ip="$(ip_del_resumen "$salida")"
     if [[ -n "$ip" ]]; then
         en_vm_es "$ip" "sshd: SSH por contraseña activado" "passwordauthentication yes" "sudo sshd -T | grep -i '^passwordauthentication'"
+        en_vm_es "$ip" "administrador con contraseña"      "con-contraseña" "sudo passwd -S administrador | awk '{print (\$2==\"P\")?\"con-contraseña\":\"sin-contraseña\"}'"
+        en_vm_es "$ip" "root sin contraseña (--no-root)"   "sin-contraseña" "sudo passwd -S root | awk '{print (\$2==\"P\")?\"con-contraseña\":\"sin-contraseña\"}'"
         info "Comprobación manual pendiente: 'ssh -o PubkeyAuthentication=no administrador@$ip' con la contraseña Prueba123"
     fi
 
     # ---------- B4: --glusterfs (imagen base: al final solo queda el disco) ----------
     titulo "B4: pruebasgluster con --glusterfs"
     inicio=$SECONDS
-    salida="$(bash "$SCRIPT" --glusterfs pruebasgluster 2>&1)"; rc=$?
+    salida="$(ejecutar_script --glusterfs pruebasgluster 2>&1)"; rc=$?
     echo "$salida" >> "$LOG"
     info "tiempo total: $(( SECONDS - inicio ))s"
     [[ $rc == 0 ]] && ok "termina con código 0" || { ko "código $rc"; echo "$salida" | tail -8 | sed 's/^/    | /'; }
@@ -293,7 +301,7 @@ fase_c() {
 
     local -a extra=()
     local salida rc inicio
-    salida="$(bash "$SCRIPT" --dry-run --gluster-cluster 2>&1)"; rc=$?
+    salida="$(ejecutar_script --dry-run --gluster-cluster 2>&1)"; rc=$?
     if [[ $rc == 21 ]]; then
         if [[ -z "${LIMPIAR:-}" ]]; then
             echo "  Ya existen elementos que el clúster tendría que crear:"
@@ -312,7 +320,7 @@ fase_c() {
     fi
 
     inicio=$SECONDS
-    salida="$(bash "$SCRIPT" ${extra[@]+"${extra[@]}"} --gluster-cluster 2>&1)"; rc=$?
+    salida="$(ejecutar_script ${extra[@]+"${extra[@]}"} --gluster-cluster 2>&1)"; rc=$?
     echo "$salida" >> "$LOG"
     info "tiempo total: $(( SECONDS - inicio ))s"
     [[ $rc == 0 ]] && ok "termina con código 0" || { ko "código $rc"; echo "$salida" | tail -20 | sed 's/^/    | /'; }
@@ -358,6 +366,23 @@ fase_c() {
     en_vm_es "$ip1" "server2 aparece como peer"      "1" "sudo gluster peer status | grep -c '^Hostname: server2'"
     # --mode=script: 'peer detach' pide confirmación y no hay quien la conteste
     en_vm_es "$ip1" "gluster peer detach server2 (limpieza)" "peer detach: success" "sudo gluster --mode=script peer detach server2"
+
+    # ---------- C2: rehacer los nodos reutilizando la imagen base (--base) ----------
+    titulo "C2: los 4 nodos de nuevo a partir de glusterbase.qcow2 ya construido (--limpiar --base)"
+    inicio=$SECONDS
+    salida="$(ejecutar_script --limpiar --gluster-cluster --base glusterbase.qcow2 2>&1)"; rc=$?
+    echo "$salida" >> "$LOG"
+    info "tiempo total: $(( SECONDS - inicio ))s"
+    [[ $rc == 0 ]] && ok "termina con código 0" || { ko "código $rc"; echo "$salida" | tail -12 | sed 's/^/    | /'; }
+    grep -q "Fase 1 de 2: se omite" <<< "$salida" && ok "se omite la fase 1" || ko "no omitió la fase 1"
+    comprueba "glusterbase.qcow2 sigue existiendo (--limpiar no lo ha tocado)" test -f "$SILO/glusterbase.qcow2"
+    comprueba "los 4 nodos en ejecución" bash -c "[ \"\$(virsh list --name | grep -c '^${USUARIO}-server[1-4]$')\" = 4 ]"
+    comprueba "server3 es COW de glusterbase.qcow2" bash -c "[ \"\$(qemu-img info -U --output=json '$SILO/server3.qcow2' | jq -r '.\"backing-filename\"')\" = glusterbase.qcow2 ]"
+    ip="${GW%.*}.12"
+    en_vm_es "$ip" "server3: hostname"                    "server3"      hostname
+    en_vm_es "$ip" "server3: cloud-init terminado"        "status: done" cloud-init status
+    en_vm_es "$ip" "server3: 3 montajes xfs en /gluster*" "3"            "mount -t xfs | grep -c ' /gluster[123] '"
+    en_vm_es "$ip" "server3: glusterd en ejecución"       "active"       systemctl is-active glusterd
 
     echo
     if [[ -z "${CONSERVAR:-}" ]]; then

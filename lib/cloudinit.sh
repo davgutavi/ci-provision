@@ -122,13 +122,17 @@ EOF
         # 'administrador' solo la tiene si se pide --ssh-pass; si no, entra
         # únicamente por SSH con su clave, igual que en las máquinas que se
         # crean a mano siguiendo el manual.
-        echo "chpasswd:"
-        echo "  list: |"
-        if [[ -n "$SSH_PASS" ]]; then
-            echo "    administrador:${SSH_PASS}"
+        if [[ -n "$SSH_PASS" ]] || ! $NO_ROOT; then
+            echo "chpasswd:"
+            echo "  list: |"
+            if [[ -n "$SSH_PASS" ]]; then
+                echo "    administrador:${SSH_PASS}"
+            fi
+            if ! $NO_ROOT; then
+                echo "    root:${PASS_CONSOLA}"
+            fi
+            echo "  expire: false"
         fi
-        echo "    root:${PASS_CONSOLA}"
-        echo "  expire: false"
 
         # SSH por contraseña solo si el alumno lo pide explícitamente. Se fija
         # también el 'false' para no depender del valor por defecto de la imagen.

@@ -56,13 +56,19 @@ comprobar_conflictos() {
         return 0
     fi
 
-    if [[ -t 0 && -t 1 ]]; then
-        local s
-        for s in 5 4 3 2 1; do
-            printf '\r  Empezando en %ds (Ctrl-C para cancelar)…' "$s"
-            sleep 1
-        done
-        printf '\r\033[K'
+    # Confirmación por teclado. Si no hay terminal (uso desde otro script),
+    # --limpiar ya es una petición explícita y se sigue adelante.
+    if [[ -t 0 ]]; then
+        local respuesta
+        read -r -p "¿Eliminar estos elementos? [s/N] " respuesta
+        case "$respuesta" in
+            s|S|si|sí|Si|Sí|SI|SÍ) ;;
+            *)
+                echo "Cancelado: no se ha eliminado nada."
+                SALIDA_CONTROLADA=true
+                exit 0
+                ;;
+        esac
     fi
 
     for d in ${dominios[@]+"${dominios[@]}"}; do

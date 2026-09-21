@@ -377,7 +377,33 @@ Comprueba la conexión, o descárgala tú:
     echo "✔ Imagen base descargada: $BASE_IMG"
 }
 
+# La imagen indicada con --base no puede ser uno de los discos que se van a
+# crear (con --limpiar se borraría antes de usarla)
+comprobar_base_no_objetivo() {
+    local f
+    for f in ${OBJ_FICHEROS[@]+"${OBJ_FICHEROS[@]}"}; do
+        if [[ "$f" == "$BASE_IMG" ]]; then
+            error 10 "La imagen indicada con --base ($(basename "$BASE_IMG")) es uno de los discos que se crearían.
+Elige otra imagen o cambia el nombre de la máquina."
+        fi
+    done
+}
+
 comprobar_imagen_base() {
+    # Imagen indicada con --base: tiene que existir ya; no se descarga nada
+    if [[ -n "$BASE_OPT" ]]; then
+        if [[ ! -f "$BASE_IMG" ]]; then
+            error 39 "La imagen indicada con --base no está en el silo: $BASE_IMG"
+        fi
+        local info_b fmt_b
+        info_b="$(qemu-img info -U --output=json "$BASE_IMG" 2>/dev/null || true)"
+        fmt_b="$(printf '%s' "$info_b" | jq -r '.format // empty' 2>/dev/null || true)"
+        if [[ "$fmt_b" != "qcow2" ]]; then
+            error 39 "La imagen indicada con --base no es un qcow2 válido: $BASE_IMG (formato: ${fmt_b:-desconocido})."
+        fi
+        return 0
+    fi
+
     local recien_descargada=false
 
     if [[ ! -f "$BASE_IMG" ]]; then

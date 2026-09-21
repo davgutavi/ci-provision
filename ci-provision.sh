@@ -380,7 +380,33 @@ Comprueba la conexión, o descárgala tú:
     echo "✔ Imagen base descargada: $BASE_IMG"
 }
 
+# La imagen indicada con --base no puede ser uno de los discos que se van a
+# crear (con --limpiar se borraría antes de usarla)
+comprobar_base_no_objetivo() {
+    local f
+    for f in ${OBJ_FICHEROS[@]+"${OBJ_FICHEROS[@]}"}; do
+        if [[ "$f" == "$BASE_IMG" ]]; then
+            error 10 "La imagen indicada con --base ($(basename "$BASE_IMG")) es uno de los discos que se crearían.
+Elige otra imagen o cambia el nombre de la máquina."
+        fi
+    done
+}
+
 comprobar_imagen_base() {
+    # Imagen indicada con --base: tiene que existir ya; no se descarga nada
+    if [[ -n "$BASE_OPT" ]]; then
+        if [[ ! -f "$BASE_IMG" ]]; then
+            error 39 "La imagen indicada con --base no está en el silo: $BASE_IMG"
+        fi
+        local info_b fmt_b
+        info_b="$(qemu-img info -U --output=json "$BASE_IMG" 2>/dev/null || true)"
+        fmt_b="$(printf '%s' "$info_b" | jq -r '.format // empty' 2>/dev/null || true)"
+        if [[ "$fmt_b" != "qcow2" ]]; then
+            error 39 "La imagen indicada con --base no es un qcow2 válido: $BASE_IMG (formato: ${fmt_b:-desconocido})."
+        fi
+        return 0
+    fi
+
     local recien_descargada=false
 
     if [[ ! -f "$BASE_IMG" ]]; then
@@ -516,13 +542,19 @@ comprobar_conflictos() {
         return 0
     fi
 
-    if [[ -t 0 && -t 1 ]]; then
-        local s
-        for s in 5 4 3 2 1; do
-            printf '\r  Empezando en %ds (Ctrl-C para cancelar)…' "$s"
-            sleep 1
-        done
-        printf '\r\033[K'
+    # Confirmación por teclado. Si no hay terminal (uso desde otro script),
+    # --limpiar ya es una petición explícita y se sigue adelante.
+    if [[ -t 0 ]]; then
+        local respuesta
+        read -r -p "¿Eliminar estos elementos? [s/N] " respuesta
+        case "$respuesta" in
+            s|S|si|sí|Si|Sí|SI|SÍ) ;;
+            *)
+                echo "Cancelado: no se ha eliminado nada."
+                SALIDA_CONTROLADA=true
+                exit 0
+                ;;
+        esac
     fi
 
     for d in ${dominios[@]+"${dominios[@]}"}; do
@@ -665,13 +697,17 @@ EOF
         # 'administrador' solo la tiene si se pide --ssh-pass; si no, entra
         # únicamente por SSH con su clave, igual que en las máquinas que se
         # crean a mano siguiendo el manual.
-        echo "chpasswd:"
-        echo "  list: |"
-        if [[ -n "$SSH_PASS" ]]; then
-            echo "    administrador:${SSH_PASS}"
+        if [[ -n "$SSH_PASS" ]] || ! $NO_ROOT; then
+            echo "chpasswd:"
+            echo "  list: |"
+            if [[ -n "$SSH_PASS" ]]; then
+                echo "    administrador:${SSH_PASS}"
+            fi
+            if ! $NO_ROOT; then
+                echo "    root:${PASS_CONSOLA}"
+            fi
+            echo "  expire: false"
         fi
-        echo "    root:${PASS_CONSOLA}"
-        echo "  expire: false"
 
         # SSH por contraseña solo si el alumno lo pide explícitamente. Se fija
         # también el 'false' para no depender del valor por defecto de la imagen.
@@ -1062,11 +1098,25 @@ discos_extra_nodo() {
     done
 }
 
+# Disco de la imagen base del clúster: la que se construye en la fase 1 o,
+# con --base, una que ya existe en el silo
+disco_base_cluster() {
+    if [[ -n "$BASE_OPT" ]]; then
+        echo "${SILO_DIR}/${BASE_OPT}"
+    else
+        echo "${SILO_DIR}/${CLUSTER_BASE}.qcow2"
+    fi
+}
+
 # Rellena OBJ_DOMINIOS y OBJ_FICHEROS con todo lo que crea el clúster
 objetivos_cluster() {
     local host d
-    OBJ_DOMINIOS=( "${USUARIO}-${CLUSTER_BASE}" )
-    OBJ_FICHEROS=( "${SILO_DIR}/${CLUSTER_BASE}.qcow2" )
+    OBJ_DOMINIOS=()
+    OBJ_FICHEROS=()
+    if [[ -z "$BASE_OPT" ]]; then
+        OBJ_DOMINIOS+=( "${USUARIO}-${CLUSTER_BASE}" )
+        OBJ_FICHEROS+=( "${SILO_DIR}/${CLUSTER_BASE}.qcow2" )
+    fi
     for host in "${CLUSTER_NODOS[@]}"; do
         OBJ_DOMINIOS+=( "${USUARIO}-${host}" )
         OBJ_FICHEROS+=( "${SILO_DIR}/${host}.qcow2" )
@@ -1119,8 +1169,8 @@ Puedes verlo con: virsh console $vm  (root, contraseña ${PASS_CONSOLA}) y cloud
 
 mostrar_plan_cluster() {
     local base_vm="${USUARIO}-${CLUSTER_BASE}"
-    local base_disco="${SILO_DIR}/${CLUSTER_BASE}.qcow2"
-    local i host vm
+    local base_disco i host vm
+    base_disco="$(disco_base_cluster)"
 
     echo "→ MODO SIMULACIÓN (--dry-run): no se creará nada."
     echo
@@ -1135,15 +1185,19 @@ mostrar_plan_cluster() {
     avisar_imagen_falta
     echo
 
-    echo "Fase 1: base GlusterFS"
-    echo "    Máquina $base_vm con disco $(basename "$base_disco") (COW de $(basename "$BASE_IMG"), $TAM_DISCO)."
-    echo "    Instala glusterfs-server y xfsprogs, habilita glusterd, vacía el machine-id."
-    echo "    Al terminar se apaga y se elimina el dominio; el disco se conserva como respaldo."
-    generar_cloudinit "$base_vm" "$CLUSTER_BASE" "" gluster
-    construir_comando "$base_vm" "$RAM_MB" "$VCPUS" "$base_disco"
-    echo "    Ficheros cloud-init en $WORKDIR/"
-    echo "    Comando:"
-    imprimir_comando | sed 's/^/    /'
+    if [[ -n "$BASE_OPT" ]]; then
+        echo "Fase 1: se omite. Los nodos partirán de la imagen que ya existe: $(basename "$base_disco")"
+    else
+        echo "Fase 1: base GlusterFS"
+        echo "    Máquina $base_vm con disco $(basename "$base_disco") (COW de $(basename "$BASE_IMG"), $TAM_DISCO)."
+        echo "    Instala glusterfs-server y xfsprogs, habilita glusterd, vacía el machine-id."
+        echo "    Al terminar se apaga y se elimina el dominio; el disco se conserva como respaldo."
+        generar_cloudinit "$base_vm" "$CLUSTER_BASE" "" gluster
+        construir_comando "$base_vm" "$RAM_MB" "$VCPUS" "$base_disco"
+        echo "    Ficheros cloud-init en $WORKDIR/"
+        echo "    Comando:"
+        imprimir_comando | sed 's/^/    /'
+    fi
     echo
 
     echo "Fase 2: ${#CLUSTER_NODOS[@]} nodos, cada uno con ${#UNIDADES_CLUSTER[@]} discos extra de ${TAM_DISCO_EXTRA}"
@@ -1166,7 +1220,8 @@ mostrar_plan_cluster() {
 }
 
 print_summary_cluster() {
-    local i host vm ip
+    local i host vm ip base_disco
+    base_disco="$(disco_base_cluster)"
     echo "-------------------------------------------"
     echo "Infraestructura GlusterFS creada (boletín 2, epígrafe 2.4)"
     echo
@@ -1189,21 +1244,26 @@ print_summary_cluster() {
     if [[ -n "$SSH_PASS" ]]; then
         echo "                                        (o con la contraseña: $SSH_PASS)"
     fi
-    echo "  virsh console ${USUARIO}-server1        root, contraseña: $PASS_CONSOLA"
+    if $NO_ROOT; then
+        echo "  virsh console ${USUARIO}-server1        (root sin contraseña: --no-root)"
+    else
+        echo "  virsh console ${USUARIO}-server1        root, contraseña: $PASS_CONSOLA"
+    fi
     echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system ${USUARIO}-server1"
     echo
-    echo "IMPORTANTE: no borres ${SILO_DIR}/${CLUSTER_BASE}.qcow2."
+    echo "IMPORTANTE: no borres $base_disco."
     echo "            Los discos de los ${#CLUSTER_NODOS[@]} nodos dependen de él."
     echo "-------------------------------------------"
 }
 
 ejecutar_cluster() {
     local base_vm="${USUARIO}-${CLUSTER_BASE}"
-    local base_disco="${SILO_DIR}/${CLUSTER_BASE}.qcow2"
-    local i host vm ip disco d
+    local base_disco i host vm ip disco d
     local -a extras nodos_vm=()
+    base_disco="$(disco_base_cluster)"
 
     objetivos_cluster
+    comprobar_base_no_objetivo
     comprobar_conflictos
 
     if $DRY_RUN; then
@@ -1214,8 +1274,12 @@ ejecutar_cluster() {
     ########################################
     # Fase 1: base
     ########################################
-    echo "═══ Fase 1 de 2: base GlusterFS ($base_vm) ═══"
-    crear_base_gluster "$base_vm" "$CLUSTER_BASE" "$base_disco"
+    if [[ -n "$BASE_OPT" ]]; then
+        echo "═══ Fase 1 de 2: se omite; los nodos parten de $(basename "$base_disco") ═══"
+    else
+        echo "═══ Fase 1 de 2: base GlusterFS ($base_vm) ═══"
+        crear_base_gluster "$base_vm" "$CLUSTER_BASE" "$base_disco"
+    fi
     echo
 
     ########################################
@@ -1330,6 +1394,8 @@ TAM_DISCO="$TAM_DISCO_DEFECTO"
 RAM_OPT=""
 VCPUS_OPT=""
 SSH_PASS=""
+NO_ROOT=false      # --no-root: root sin contraseña, como en las máquinas hechas a mano
+BASE_OPT=""        # --base: imagen del silo de la que hacer la copia COW
 
 MAQUINA=""
 IP=""
@@ -1465,8 +1531,15 @@ Opciones:
                        boletín 2: la base anterior y ${#CLUSTER_NODOS[@]} nodos (${CLUSTER_NODOS[*]})
                        con IP fija, /etc/hosts, ${#UNIDADES_CLUSTER[@]} discos cada uno y
                        ${CLUSTER_MONTAJES[*]} en xfs. No lleva MAQUINA.
+  --base FICHERO       Imagen del silo de la que hacer la copia COW, en lugar de
+                       debian12.qcow2 (p.ej. una imagen base GlusterFS que ya
+                       tengas). Con --gluster-cluster se omite la fase 1 y los
+                       nodos parten de ella.
+  --no-root            No habilita al usuario root (queda sin contraseña, como en
+                       las máquinas que se crean a mano)
   --limpiar            Si ya existen los dominios o discos que el script va a
-                       crear, los elimina antes (solo esos; nada más)
+                       crear, los elimina antes (solo esos; nada más), previa
+                       confirmación
   --red NOMBRE         Red virtual a usar (por defecto se busca ${USUARIO}-red)
   --disco NOMBRE       Nombre del disco principal (por defecto MAQUINA.qcow2)
   --tam TAMAÑO         Tamaño del disco principal (por defecto ${TAM_DISCO_DEFECTO})
@@ -1484,14 +1557,16 @@ En todas las máquinas:
   - Usuario 'administrador' con tu clave pública ($PUBKEY_PATH) y
     sudo sin contraseña. Sin contraseña propia salvo que uses --ssh-pass.
   - Usuario 'root' con contraseña '${PASS_CONSOLA}', solo para la consola
-    (virsh console o virt-viewer); por SSH no puede entrar.
+    (virsh console o virt-viewer); por SSH no puede entrar. Con --no-root,
+    sin contraseña.
   - Consola gráfica activa (virt-viewer).
 
 Ejemplos:
-  $0 server1                              # DHCP
-  $0 --extra-disks server1 192.168.XXX.2  # SERVER1 del apartado A.3.1
-  $0 --glusterfs glusterbase              # un nodo GlusterFS suelto
-  $0 --gluster-cluster                    # infraestructura del apartado A.3.2
+  $0 server1                                    # DHCP
+  $0 --extra-disks server1 192.168.XXX.2        # SERVER1 del boletín 2, epígrafe 2.1
+  $0 --gluster-cluster                          # infraestructura del boletín 2, epígrafe 2.4
+  $0 --glusterfs glusterbase                    # solo la imagen base GlusterFS
+  $0 --gluster-cluster --base glusterbase.qcow2 # la infraestructura a partir de esa imagen
   $0 --dry-run --extra-disks server1 192.168.XXX.2   # solo comprobar
 EOF
 }
@@ -1510,13 +1585,15 @@ parse_args() {
             --limpiar)         LIMPIAR=true;     shift ;;
             --dry-run)         DRY_RUN=true;     shift ;;
             --no-wait)         NO_WAIT=true;     shift ;;
-            --red|--disco|--tam|--ram|--vcpus|--ssh-pass)
+            --no-root)         NO_ROOT=true;     shift ;;
+            --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass)
                 if [[ $# -lt 2 ]]; then
                     error 11 "Falta el valor de la opción $1"
                 fi
                 case "$1" in
                     --red)      RED_OPT="$2"   ;;
                     --disco)    DISCO_OPT="$2" ;;
+                    --base)     BASE_OPT="$2"  ;;
                     --tam)      TAM_DISCO="$2" ;;
                     --ram)      RAM_OPT="$2"   ;;
                     --vcpus)    VCPUS_OPT="$2" ;;
@@ -1530,7 +1607,7 @@ parse_args() {
                 ;;
             # Opciones de la versión anterior: se explica qué ha cambiado
             --enable-root)
-                error 12 "La opción --enable-root ya no existe: root está siempre habilitado por consola (contraseña ${PASS_CONSOLA})."
+                error 12 "La opción --enable-root ya no existe: root está habilitado por consola de forma predeterminada (contraseña ${PASS_CONSOLA}); usa --no-root si no lo quieres."
                 ;;
             --virt-viewer)
                 error 12 "La opción --virt-viewer ya no existe: la consola gráfica está siempre activa."
@@ -1618,6 +1695,13 @@ Solo letras, números y guiones, empezando por letra o número (p.ej. server1, g
 
     if [[ -n "$DISCO_OPT" ]] && ! [[ "$DISCO_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
         error 16 "El nombre de disco '$DISCO_OPT' no es válido. Indica solo el nombre del fichero (sin rutas), p.ej. server1.qcow2."
+    fi
+
+    if [[ -n "$BASE_OPT" ]]; then
+        if ! [[ "$BASE_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            error 16 "El nombre de imagen '$BASE_OPT' (--base) no es válido. Indica solo el nombre del fichero del silo (sin rutas), p.ej. glusterbase.qcow2."
+        fi
+        BASE_IMG="${SILO_DIR}/${BASE_OPT}"
     fi
 
     # La contraseña se teclea en la consola de la máquina virtual, cuyo teclado
@@ -1787,7 +1871,11 @@ print_summary() {
     if [[ -n "$SSH_PASS" ]]; then
         echo "                                        (o con la contraseña: $SSH_PASS)"
     fi
-    echo "  virsh console $VM_NAME        root, contraseña: $PASS_CONSOLA"
+    if $NO_ROOT; then
+        echo "  virsh console $VM_NAME        (root sin contraseña: --no-root)"
+    else
+        echo "  virsh console $VM_NAME        root, contraseña: $PASS_CONSOLA"
+    fi
     echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system $VM_NAME"
     echo "-------------------------------------------"
 }
@@ -1832,6 +1920,7 @@ ejecutar_maquina() {
     # Conflictos con lo que ya exista (y --limpiar, si se pidió)
     OBJ_DOMINIOS=( "$VM_NAME" )
     OBJ_FICHEROS=( "$DISCO_MAIN" ${extras[@]+"${extras[@]}"} )
+    comprobar_base_no_objetivo
     comprobar_conflictos
 
     generar_cloudinit "$VM_NAME" "$HOST_NAME" "$IP" "$modo"
