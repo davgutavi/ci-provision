@@ -28,8 +28,8 @@ Todas las máquinas que crea tienen:
   tu imagen base GlusterFS), en lugar de `debian12.qcow2`.
 - `--ssh-pass`: da una contraseña a `administrador` y permite entrar por SSH escribiéndola,
   en lugar de con tu clave pública.
-- `--no-root`: no habilita al usuario `root` (queda sin contraseña, como en las máquinas
-  que se crean a mano).
+- `--no-root`: no habilita al usuario `root`.
+- `--no-virt-viewer`: no habilita la consola gráfica.
 - `--limpiar`: elimina, antes de empezar, las máquinas y discos que el script vaya a crear
   si ya existen de una ejecución anterior.
 
@@ -53,7 +53,7 @@ virsh net-list
 
 Si tu red se llama de otra forma, el script la encontrará igualmente siempre que
 empiece por tu nombre de usuario. Si tienes varias, o se llama de otro modo,
-indícala con `--red NOMBRE` (ver opciones avanzadas).
+indícala con `--red NOMBRE` (ver [opciones avanzadas](#opciones-avanzadas)).
 
 ## **3. Imagen cloud de Debian 12**
 
@@ -113,6 +113,18 @@ curl -L https://raw.githubusercontent.com/davgutavi/ci-provision/main/ci-provisi
 chmod u+x ci-provision.sh
 ```
 
+### Todo en un comando
+
+**wget:**
+```bash
+cd $HOME/imagenesMV && wget https://raw.githubusercontent.com/davgutavi/ci-provision/main/ci-provision.sh -O ci-provision.sh && chmod u+x ci-provision.sh
+```
+
+**curl:**
+```bash
+cd $HOME/imagenesMV && curl -L https://raw.githubusercontent.com/davgutavi/ci-provision/main/ci-provision.sh -o ci-provision.sh && chmod u+x ci-provision.sh
+```
+
 ### Verificación
 ```bash
 ./ci-provision.sh -h
@@ -144,16 +156,17 @@ De `MAQUINA` (por ejemplo `server1`) salen el nombre del dominio en libvirt
 
 | Opción | Descripción |
 |--------|-------------|
-| `--extra-disks` | Crea y conecta 6 discos extra de 40G (`vdb`..`vdg`) |
-| `--glusterfs` | Construye una imagen base GlusterFS y deja solo el disco (ver sección 5) |
-| `--gluster-cluster` | Construye la infraestructura completa del boletín 2, epígrafe 2.4 (ver sección 5) |
-| `--base FICHERO` | Imagen del silo de la que hacer la copia, en lugar de `debian12.qcow2`. Con `--gluster-cluster`, los nodos parten de ella y no se construye la base |
+| `--extra-disks` | Crea y conecta 6 discos extra de 40G (`vdb`..`vdg`). Ver [SERVER1 del boletín 2](#caso-server1) |
+| `--glusterfs` | Construye una imagen base GlusterFS y deja solo el disco. Ver [solo la imagen base](#caso-imagen-base) |
+| `--gluster-cluster` | Construye la infraestructura completa del boletín 2, epígrafe 2.4. Ver [infraestructura GlusterFS](#caso-cluster) |
+| `--base FICHERO` | Imagen del silo de la que hacer la copia, en lugar de `debian12.qcow2`. Con `--gluster-cluster`, los nodos parten de ella y no se construye la base. Ver [si ya tienes tu imagen base](#caso-base-propia) |
 | `--ssh-pass CONTRASEÑA` | Da esa contraseña a `administrador` y permite entrar por SSH escribiéndola. La eliges tú; solo caracteres ASCII |
 | `--no-root` | No habilita al usuario `root` |
+| `--no-virt-viewer` | No habilita la consola gráfica. La consola de texto (`virsh console`) sigue funcionando |
 | `--limpiar` | Si ya existen los dominios o discos que el script va a crear, los elimina antes, previa confirmación. **Solo esos** |
 | `-h` | Ayuda |
 
-Hay más opciones para casos particulares en la sección 9, *Opciones avanzadas*.
+Hay más opciones para casos particulares en [opciones avanzadas](#opciones-avanzadas).
 
 ### ⏳ Qué pasa al ejecutarlo
 
@@ -180,6 +193,7 @@ confirmación por teclado.
 
 ---
 
+<a id="casos-de-uso"></a>
 # 5. 🧪 Casos de uso
 
 ---
@@ -206,22 +220,13 @@ confirmación por teclado.
 
 ---
 
+<a id="caso-server1"></a>
 ## 🟩 **2️⃣ SERVER1 del boletín 2 — Epígrafe 2.1**
 
 ### **Máquina con IP fija y seis discos extra**
 
 ```bash
 ./ci-provision.sh --extra-disks server1 192.168.XXX.2
-```
-
-Root ya está habilitado por consola: no hace falta pedirlo.
-
-Cuando el script termine, toma la instantánea `inicio` **con la máquina apagada**:
-
-```bash
-virsh shutdown usuario-server1
-virsh snapshot-create-as usuario-server1 --atomic --name inicio
-virsh start usuario-server1
 ```
 
 ### **Si `server1` ya existía y quieres rehacerla desde cero**
@@ -232,6 +237,7 @@ virsh start usuario-server1
 
 ---
 
+<a id="caso-cluster"></a>
 ## 🟥 **3️⃣ Infraestructura GlusterFS del boletín 2 — Epígrafe 2.4**
 
 ### **Todo en un comando**
@@ -242,10 +248,10 @@ virsh start usuario-server1
 
 Crea, en dos fases:
 
-1. **Una imagen base** `glusterbase.qcow2`, con `glusterfs-server` y `xfsprogs`
-   instalados, `glusterd` habilitado y el `machine-id` vacío. Se construye en
-   una máquina provisional (`usuario-glusterbase`) que, al terminar, se apaga y
-   se elimina; el disco **se conserva**, porque los nodos son copias COW de él.
+1. **Una imagen base** `glusterbase.qcow2`, con `glusterfs-server` instalado,
+   `glusterd` habilitado y el `machine-id` vacío. Se construye en una máquina
+   provisional (`usuario-glusterbase`) que, al terminar, se apaga y se elimina;
+   el disco **se conserva**, porque los nodos son copias COW de él.
 2. **Cuatro nodos** `usuario-server1`..`usuario-server4`, cada uno con:
    - IP fija `192.168.XXX.10`, `.11`, `.12` y `.13`
    - `/etc/hosts` con los cuatro nombres
@@ -267,6 +273,7 @@ dirá. Para que los elimine él:
 ./ci-provision.sh --limpiar --gluster-cluster
 ```
 
+<a id="caso-base-propia"></a>
 ### **Si ya tienes tu imagen base y solo quieres los nodos**
 
 Con `--base` no se construye la base: los cuatro nodos se crean directamente
@@ -277,6 +284,7 @@ como copias de la imagen que indiques, que **no se toca** (ni siquiera con
 ./ci-provision.sh --gluster-cluster --base glusterbase.qcow2
 ```
 
+<a id="caso-imagen-base"></a>
 ### **Solo la imagen base**
 
 ```bash
@@ -309,7 +317,11 @@ imagen también sirve `--base`:
 | Acceso | Requisitos | Estado |
 |--------|------------|--------|
 | SSH | – | ❌ Prohibido |
-| Consola (`virsh console` / virt-viewer) | Ninguno (salvo `--no-root`) | ✔ contraseña `s1st3mas` |
+| Consola (`virsh console` / virt-viewer) | Ninguno | ✔ contraseña `s1st3mas` |
+
+Con `--no-root`, el usuario `root` queda sin contraseña y no se puede entrar con
+él por ningún medio. Con `--no-virt-viewer`, la máquina no tiene consola gráfica;
+`virsh console` sigue funcionando.
 
 ### Ejemplos
 
@@ -387,9 +399,10 @@ base y cada nodo).
 
 ---
 
+<a id="opciones-avanzadas"></a>
 # 9. 🔧 Opciones avanzadas
 
-No las necesitas en los casos de uso de la sección 5.
+No las necesitas en los [casos de uso](#casos-de-uso).
 
 | Opción | Descripción |
 |--------|-------------|

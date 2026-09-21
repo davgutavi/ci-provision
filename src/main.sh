@@ -66,6 +66,7 @@ RAM_OPT=""
 VCPUS_OPT=""
 SSH_PASS=""
 NO_ROOT=false      # --no-root: root sin contraseña, como en las máquinas hechas a mano
+NO_GRAFICOS=false  # --no-virt-viewer: sin consola gráfica
 BASE_OPT=""        # --base: imagen del silo de la que hacer la copia COW
 
 MAQUINA=""
@@ -214,6 +215,8 @@ Opciones:
                        nodos parten de ella.
   --no-root            No habilita al usuario root (queda sin contraseña, como en
                        las máquinas que se crean a mano)
+  --no-virt-viewer     No habilita la consola gráfica (virt-viewer). La consola de
+                       texto (virsh console) sigue funcionando.
   --limpiar            Si ya existen los dominios o discos que el script va a
                        crear, los elimina antes (solo esos; nada más), previa
                        confirmación
@@ -236,7 +239,7 @@ En todas las máquinas:
   - Usuario 'root' con contraseña '${PASS_CONSOLA}', solo para la consola
     (virsh console o virt-viewer); por SSH no puede entrar. Con --no-root,
     sin contraseña.
-  - Consola gráfica activa (virt-viewer).
+  - Consola gráfica activa (virt-viewer), salvo con --no-virt-viewer.
 
 Ejemplos:
   $0 server1                                    # DHCP
@@ -263,6 +266,7 @@ parse_args() {
             --dry-run)         DRY_RUN=true;     shift ;;
             --no-wait)         NO_WAIT=true;     shift ;;
             --no-root)         NO_ROOT=true;     shift ;;
+            --no-virt-viewer)  NO_GRAFICOS=true; shift ;;
             --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass)
                 if [[ $# -lt 2 ]]; then
                     error 11 "Falta el valor de la opción $1"
@@ -287,7 +291,7 @@ parse_args() {
                 error 12 "La opción --enable-root ya no existe: root está habilitado por consola de forma predeterminada (contraseña ${PASS_CONSOLA}); usa --no-root si no lo quieres."
                 ;;
             --virt-viewer)
-                error 12 "La opción --virt-viewer ya no existe: la consola gráfica está siempre activa."
+                error 12 "La opción --virt-viewer ya no existe: la consola gráfica está activa de forma predeterminada; usa --no-virt-viewer si no la quieres."
                 ;;
             --user-pass)
                 error 12 "La opción --user-pass ha sido sustituida por --ssh-pass CONTRASEÑA.
@@ -458,9 +462,15 @@ construir_comando() {
         --os-variant debian12
         --network "network=$NET_NAME"
         --cloud-init "user-data=$USER_DATA,meta-data=$META_DATA${NETWORK_DATA:+,network-config=$NETWORK_DATA}"
-        --graphics spice
-        --noautoconsole
     )
+
+    if $NO_GRAFICOS; then
+        VIRT_INSTALL_CMD+=( --graphics none )
+    else
+        VIRT_INSTALL_CMD+=( --graphics spice )
+    fi
+
+    VIRT_INSTALL_CMD+=( --noautoconsole )
 }
 
 # Muestra el comando de forma legible, una opción por línea
@@ -553,7 +563,9 @@ print_summary() {
     else
         echo "  virsh console $VM_NAME        root, contraseña: $PASS_CONSOLA"
     fi
-    echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system $VM_NAME"
+    if ! $NO_GRAFICOS; then
+        echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system $VM_NAME"
+    fi
     echo "-------------------------------------------"
 }
 
@@ -565,8 +577,9 @@ print_summary_base() {
     echo "Imagen base GlusterFS lista"
     echo
     echo "Disco        : $DISCO_MAIN ($TAM_DISCO)"
-    echo "Contenido    : Debian 12 con glusterfs-server y xfsprogs instalados,"
-    echo "               glusterd habilitado, zona horaria Europe/Madrid y machine-id vacío"
+    echo "Contenido    : Debian 12 con glusterfs-server instalado (y las herramientas para"
+    echo "               formatear en xfs), glusterd habilitado, zona horaria Europe/Madrid"
+    echo "               y machine-id vacío"
     echo "Dominio      : $VM_NAME se ha eliminado; solo queda el disco"
     echo
     echo "Úsalo como respaldo de las copias COW de tus nodos, por ejemplo:"

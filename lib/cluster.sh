@@ -128,7 +128,7 @@ mostrar_plan_cluster() {
     else
         echo "Fase 1: base GlusterFS"
         echo "    Máquina $base_vm con disco $(basename "$base_disco") (COW de $(basename "$BASE_IMG"), $TAM_DISCO)."
-        echo "    Instala glusterfs-server y xfsprogs, habilita glusterd, vacía el machine-id."
+        echo "    Instala glusterfs-server (y las herramientas para formatear en xfs), habilita glusterd, vacía el machine-id."
         echo "    Al terminar se apaga y se elimina el dominio; el disco se conserva como respaldo."
         generar_cloudinit "$base_vm" "$CLUSTER_BASE" "" gluster
         construir_comando "$base_vm" "$RAM_MB" "$VCPUS" "$base_disco"
@@ -187,7 +187,9 @@ print_summary_cluster() {
     else
         echo "  virsh console ${USUARIO}-server1        root, contraseña: $PASS_CONSOLA"
     fi
-    echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system ${USUARIO}-server1"
+    if ! $NO_GRAFICOS; then
+        echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system ${USUARIO}-server1"
+    fi
     echo
     echo "IMPORTANTE: no borres $base_disco."
     echo "            Los discos de los ${#CLUSTER_NODOS[@]} nodos dependen de él."

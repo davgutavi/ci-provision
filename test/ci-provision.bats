@@ -402,6 +402,14 @@ qinfo() {
     assert_output --partial "root sin contraseña"
 }
 
+@test "--no-virt-viewer: sin consola gráfica, y no se sugiere virt-viewer" {
+    run bash "$SCRIPT" --no-virt-viewer server1
+    assert_success
+    [ "$(llamadas '--graphics none')" -eq 1 ]
+    [ "$(llamadas '--graphics spice')" -eq 0 ]
+    refute_output --partial "virt-viewer --connect"
+}
+
 @test "--no-root con --ssh-pass: solo administrador tiene contraseña" {
     run bash "$SCRIPT" --no-root --ssh-pass MiPass1 server1
     assert_success

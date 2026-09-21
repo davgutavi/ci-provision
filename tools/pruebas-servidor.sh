@@ -254,11 +254,12 @@ fase_b() {
         en_vm_es "$IP_LIBRE" "netplan renderizado con routes"   "1" "sudo grep -c 'to: default' /etc/netplan/50-cloud-init.yaml"
     fi
 
-    # ---------- B3: --ssh-pass y --no-root ----------
-    titulo "B3: pruebas1 con --ssh-pass y --no-root (con --limpiar)"
-    salida="$(ejecutar_script --limpiar --no-root --ssh-pass Prueba123 pruebas1 2>&1)"; rc=$?
+    # ---------- B3: --ssh-pass, --no-root y --no-virt-viewer ----------
+    titulo "B3: pruebas1 con --ssh-pass, --no-root y --no-virt-viewer (con --limpiar)"
+    salida="$(ejecutar_script --limpiar --no-root --no-virt-viewer --ssh-pass Prueba123 pruebas1 2>&1)"; rc=$?
     echo "$salida" >> "$LOG"
     [[ $rc == 0 ]] && ok "termina con código 0" || ko "código $rc"
+    comprueba "sin consola gráfica (--no-virt-viewer)" bash -c "! virsh dumpxml ${USUARIO}-pruebas1 | grep -q \"graphics type='spice'\""
     ip="$(ip_del_resumen "$salida")"
     if [[ -n "$ip" ]]; then
         en_vm_es "$ip" "sshd: SSH por contraseña activado" "passwordauthentication yes" "sudo sshd -T | grep -i '^passwordauthentication'"
