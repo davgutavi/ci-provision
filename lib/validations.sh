@@ -383,8 +383,8 @@ comprobar_imagen_base() {
 
     if [[ ! -f "$BASE_IMG" ]]; then
         if $DRY_RUN; then
-            echo "AVISO: no está $(basename "$BASE_IMG") en el silo. Al ejecutar sin --dry-run se descargará de:"
-            echo "       $BASE_IMG_URL"
+            # Se avisa dentro del plan, no aquí, para que salga en orden
+            BASE_IMG_FALTA=true
             return 0
         fi
         descargar_imagen_base

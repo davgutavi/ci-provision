@@ -63,9 +63,11 @@ espera_codigo() {
 
 # ssh a una máquina de prueba con un known_hosts desechable (la IP puede
 # haberla tenido otra máquina, y no queremos tocar el known_hosts real)
+# -n: la orden remota no recibe el teclado. Si algo pidiera confirmación,
+# fallaría en vez de quedarse esperando sin que se vea la pregunta.
 en_vm() {
     local ip="$1"; shift
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o LogLevel=ERROR -o ConnectTimeout=10 "administrador@$ip" "$@"
 }
 
@@ -355,7 +357,8 @@ fase_c() {
     en_vm_es "$ip1" "gluster peer probe server2"     "peer probe: success" "sudo gluster peer probe server2"
     sleep 3
     en_vm_es "$ip1" "server2 aparece como peer"      "1" "sudo gluster peer status | grep -c '^Hostname: server2'"
-    en_vm "$ip1" "sudo gluster peer detach server2" >>"$LOG" 2>&1
+    # --mode=script: 'peer detach' pide confirmación y no hay quien la conteste
+    en_vm_es "$ip1" "gluster peer detach server2 (limpieza)" "peer detach: success" "sudo gluster --mode=script peer detach server2"
 
     echo
     if [[ -z "${CONSERVAR:-}" ]]; then

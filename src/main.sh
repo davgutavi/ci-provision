@@ -85,6 +85,9 @@ NETWORK_DATA=""
 # Comando virt-install, como array para poder ejecutarlo y mostrarlo tal cual
 VIRT_INSTALL_CMD=()
 
+# En --dry-run: la imagen base no está y habría que descargarla
+BASE_IMG_FALTA=false
+
 ########################################
 # Registro de lo creado, para poder deshacerlo si algo falla a medias
 ########################################
@@ -459,6 +462,14 @@ crear_dominio() {
     DOMINIOS_CREADOS+=( "$nombre" )
 }
 
+# En --dry-run, si la imagen base no está en el silo
+avisar_imagen_falta() {
+    if $BASE_IMG_FALTA; then
+        echo "    Imagen  : $(basename "$BASE_IMG") no está en el silo; se descargará de"
+        echo "              $BASE_IMG_URL"
+    fi
+}
+
 servidor_fqdn() {
     local h
     h="$(hostname 2>/dev/null || echo SERVIDOR)"
@@ -554,6 +565,7 @@ ejecutar_maquina() {
         else
             echo "    IP      : por DHCP"
         fi
+        avisar_imagen_falta
         echo
         echo "✔ Ficheros cloud-init generados en $WORKDIR/"
         echo

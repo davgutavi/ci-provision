@@ -65,6 +65,7 @@ mostrar_plan_cluster() {
         echo "      ${USUARIO}-${CLUSTER_NODOS[$i]}  →  ${CLUSTER_IPS[$i]}"
     done
     echo "    Recursos: ${RAM_MB} MB y ${VCPUS} vCPU por máquina"
+    avisar_imagen_falta
     echo
 
     echo "Fase 1: base GlusterFS"
