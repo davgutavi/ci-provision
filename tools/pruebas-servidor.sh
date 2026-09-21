@@ -146,12 +146,15 @@ fase_a() {
     espera_codigo 10 "sintaxis antigua (4 posicionales)"       u-s1 s1.qcow2 s1 red
     espera_codigo 12 "opción antigua --enable-root"            --enable-root pruebas1
     espera_codigo 12 "opción antigua --user-pass"              --user-pass x pruebas1
+    espera_codigo 12 "opción antigua --virt-viewer"            --virt-viewer pruebas1
     espera_codigo 12 "opción desconocida"                      --noexiste pruebas1
     espera_codigo 11 "opción sin valor"                        pruebas1 --ram
     espera_codigo 20 "nombre de máquina inválido"              "a b"
     espera_codigo 13 "RAM no numérica"                         --dry-run --ram abc pruebas1
     espera_codigo 15 "tamaño de disco inválido"                --dry-run --tam 40 pruebas1
     espera_codigo 16 "nombre de disco con ruta"                --dry-run --disco ../x.qcow2 pruebas1
+    espera_codigo 16 "--base con ruta"                         --dry-run --base ../x.qcow2 pruebas1
+    espera_codigo 39 "--base inexistente"                      --dry-run --limpiar --base no-existe-xyz.qcow2 pruebas1
     espera_codigo 14 "contraseña con tilde"                    --dry-run --ssh-pass "contraseñá" pruebas1
     espera_codigo 40 "--red inexistente"                       --dry-run --red red-que-no-existe-xyz pruebas1
     espera_codigo 41 "IP que es la pasarela"                   --dry-run pruebas1 "$GW"
@@ -163,6 +166,8 @@ fase_a() {
         espera_codigo 0 "--dry-run con IP libre y discos extra" --dry-run --limpiar --extra-disks pruebas1 "$IP_LIBRE"
     fi
     espera_codigo 0  "--dry-run --limpiar --gluster-cluster (solo enumera)" --dry-run --limpiar --gluster-cluster
+    salida="$(ejecutar_script --dry-run --limpiar --no-virt-viewer pruebas1 2>&1)"
+    grep -q -- '--graphics none' <<< "$salida" && ok "--dry-run --no-virt-viewer: el comando lleva --graphics none" || ko "--no-virt-viewer no cambia --graphics"
 
     comprueba "el --dry-run no ha creado ningún disco" bash -c "[ ! -e '$SILO/pruebas1.qcow2' ] && [ ! -e '$SILO/pruebas1-vdb.qcow2' ]"
     comprueba "el --dry-run no ha creado ningún dominio" bash -c "! virsh dominfo '${USUARIO}-pruebas1' >/dev/null 2>&1"
@@ -224,7 +229,6 @@ fase_b() {
         en_vm_es "$ip" "administrador sin contraseña propia" "sin-contraseña" "sudo passwd -S administrador | awk '{print (\$2==\"P\")?\"con-contraseña\":\"sin-contraseña\"}'"
         en_vm_es "$ip" "root tiene contraseña de consola"    "P"              "sudo passwd -S root | awk '{print \$2}'"
         en_vm_es "$ip" "sudo sin contraseña"             "root"          sudo id -un
-        info "Comprobación manual pendiente: 'virsh console ${USUARIO}-pruebas1' y entrar como root / s1st3mas"
     fi
 
     # Instantánea en caliente: es el caso del apartado B.6 del manual
@@ -265,7 +269,7 @@ fase_b() {
         en_vm_es "$ip" "sshd: SSH por contraseña activado" "passwordauthentication yes" "sudo sshd -T | grep -i '^passwordauthentication'"
         en_vm_es "$ip" "administrador con contraseña"      "con-contraseña" "sudo passwd -S administrador | awk '{print (\$2==\"P\")?\"con-contraseña\":\"sin-contraseña\"}'"
         en_vm_es "$ip" "root sin contraseña (--no-root)"   "sin-contraseña" "sudo passwd -S root | awk '{print (\$2==\"P\")?\"con-contraseña\":\"sin-contraseña\"}'"
-        info "Comprobación manual pendiente: 'ssh -o PubkeyAuthentication=no administrador@$ip' con la contraseña Prueba123"
+        IP_B3="$ip"
     fi
 
     # ---------- B4: --glusterfs (imagen base: al final solo queda el disco) ----------
@@ -285,6 +289,12 @@ fase_b() {
         elimina_maquina pruebas1
         elimina_maquina pruebasgluster
         info "máquinas de prueba eliminadas (CONSERVAR=1 para mantenerlas)"
+    else
+        echo
+        info "Queda ${USUARIO}-pruebas1 tal como la dejó B3 (--ssh-pass Prueba123, --no-root, --no-virt-viewer). A mano:"
+        info "  ssh -o PubkeyAuthentication=no administrador@${IP_B3:-IP}   debe pedir la contraseña Prueba123 y entrar"
+        info "  virsh console ${USUARIO}-pruebas1                          root NO debe poder entrar (--no-root)"
+        info "  root / s1st3mas por consola: créala sin --no-root, p. ej. $SCRIPT --limpiar pruebas1"
     fi
 }
 
