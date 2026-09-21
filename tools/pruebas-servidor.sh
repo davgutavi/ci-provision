@@ -73,7 +73,8 @@ en_vm() {
 en_vm_es() {
     local ip="$1" desc="$2" esperado="$3"; shift 3
     local obtenido
-    obtenido="$(en_vm "$ip" "$@" 2>>"$LOG" | tr -d '\r' | head -1)"
+    # Se recorta el espacio final: 'ip route', por ejemplo, termina sus líneas con uno
+    obtenido="$(en_vm "$ip" "$@" 2>>"$LOG" | tr -d '\r' | head -1 | sed 's/[[:space:]]*$//')"
     if [[ "$obtenido" == "$esperado" ]]; then
         ok "$desc"
     else
@@ -202,7 +203,7 @@ fase_b() {
     comprueba "gráficos SPICE en la definición" bash -c "virsh dumpxml ${USUARIO}-pruebas1 | grep -q \"graphics type='spice'\""
     comprueba "sin ISO de cloud-init (activa)"   bash -c "! virsh domblklist ${USUARIO}-pruebas1 | grep -q cloudinit"
     comprueba "sin ISO de cloud-init (persistente)" bash -c "! virsh domblklist ${USUARIO}-pruebas1 --inactive | grep -q cloudinit"
-    comprueba "disco COW de debian12.qcow2" bash -c "[ \"\$(qemu-img info --output=json '$SILO/pruebas1.qcow2' | jq -r '.\"backing-filename\"')\" = debian12.qcow2 ]"
+    comprueba "disco COW de debian12.qcow2" bash -c "[ \"\$(qemu-img info -U --output=json '$SILO/pruebas1.qcow2' | jq -r '.\"backing-filename\"')\" = debian12.qcow2 ]"
     comprueba "directorio cloud-init 700" bash -c "[ \"\$(stat -c %a '$SILO/cloudinit-${USUARIO}-pruebas1')\" = 700 ]"
     comprueba "cip-user.yaml 600" bash -c "[ \"\$(stat -c %a '$SILO/cloudinit-${USUARIO}-pruebas1/cip-user.yaml')\" = 600 ]"
 
@@ -267,7 +268,7 @@ fase_b() {
     if [[ -n "$ip" ]]; then
         en_vm_es "$ip" "glusterd habilitado"   "enabled"  systemctl is-enabled glusterd
         en_vm_es "$ip" "glusterd no arrancado" "inactive" systemctl is-active glusterd
-        en_vm_es "$ip" "xfsprogs instalado"    "0"        "command -v mkfs.xfs >/dev/null; echo \$?"
+        en_vm_es "$ip" "xfsprogs instalado"    "install ok installed" "dpkg-query -W -f='\${Status}' xfsprogs"
         en_vm_es "$ip" "machine-id vacío"      "0"        "wc -c < /etc/machine-id"
         en_vm_es "$ip" "cloud-init terminado"  "status: done" cloud-init status
     fi
@@ -328,7 +329,7 @@ fase_c() {
         titulo "Nodo $h ($ip)"
         comprueba "dominio en ejecución" bash -c "[ \"\$(virsh domstate ${USUARIO}-$h)\" = running ]"
         comprueba "8 discos virtio conectados" bash -c "[ \"\$(virsh domblklist ${USUARIO}-$h | grep -c '^ vd')\" = 8 ]"
-        comprueba "COW de glusterbase.qcow2" bash -c "[ \"\$(qemu-img info --output=json '$SILO/$h.qcow2' | jq -r '.\"backing-filename\"')\" = glusterbase.qcow2 ]"
+        comprueba "COW de glusterbase.qcow2" bash -c "[ \"\$(qemu-img info -U --output=json '$SILO/$h.qcow2' | jq -r '.\"backing-filename\"')\" = glusterbase.qcow2 ]"
         comprueba "sin ISO de cloud-init" bash -c "! virsh domblklist ${USUARIO}-$h | grep -q cloudinit"
         comprueba "el agente reporta la IP $ip" bash -c "virsh domifaddr ${USUARIO}-$h --source agent | grep -q ' $ip/'"
 
