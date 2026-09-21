@@ -102,8 +102,9 @@ descubrir_red() {
     RED="$(sed -n 's/^    Red     : \([^ ]*\).*/\1/p' <<< "$salida" | head -1)"
     GW="$(sed -n 's/.*pasarela \([0-9.]*\),.*/\1/p' <<< "$salida" | head -1)"
 
-    # Pedimos la pasarela como IP fija: falla (41) y enumera los bloques libres
-    salida="$(bash "$SCRIPT" --dry-run pruebas1 "$GW" 2>&1)"
+    # Pedimos una IP que no puede ser de ninguna red (203.0.113.0/24 está
+    # reservada para documentación): falla con 41 y enumera los bloques libres
+    salida="$(bash "$SCRIPT" --dry-run pruebas1 203.0.113.9 2>&1)"
     local bloque ini fin
     bloque="$(sed -n '/IPs libres/{n;p;}' <<< "$salida" | head -1)"
     ini="$(awk '{print $1}' <<< "$bloque")"
