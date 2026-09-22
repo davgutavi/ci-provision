@@ -505,6 +505,43 @@ qinfo() {
     assert_output --partial "mio.qcow2 (20G)"
 }
 
+@test "--prefijo: dominio y discos con prefijo; lo de tu usuario no se toca ni con --limpiar" {
+    run bash "$SCRIPT" server1
+    assert_success
+    run bash "$SCRIPT" --limpiar --prefijo demo --extra-disks server1 </dev/null
+    assert_success
+    [ "$(llamadas '--name demo-server1')" -eq 1 ]
+    [ -e "$SILO/demo-server1.qcow2" ]
+    [ -e "$SILO/demo-server1-vdb.qcow2" ] && [ -e "$SILO/demo-server1-vdg.qcow2" ]
+    grep -q -r '^local-hostname: server1$' "$SILO/cloudinit-demo-server1/"
+    assert_output --partial "demo-server1"
+    dominio_existe "${USUARIO}-server1"
+    [ -e "$SILO/server1.qcow2" ]
+    [ ! -e "$SILO/server1-vdb.qcow2" ]
+    refute_output --partial "eliminado"
+}
+
+@test "--prefijo con --gluster-cluster: base y nodos con prefijo, hostnames intactos" {
+    touch "$SILO/glusterbase.qcow2" "$SILO/server1.qcow2"
+    run bash "$SCRIPT" --prefijo demo --gluster-cluster
+    assert_success
+    [ "$(llamadas '--name demo-glusterbase')" -eq 1 ]
+    [ "$(llamadas '--name demo-server')" -eq 4 ]
+    [ -e "$SILO/demo-glusterbase.qcow2" ]
+    [ "$(qinfo "$SILO/demo-server3.qcow2" '."backing-filename"')" = "demo-glusterbase.qcow2" ]
+    [ -e "$SILO/demo-server4-vdh.qcow2" ]
+    grep -q -r '^local-hostname: server2$' "$SILO/cloudinit-demo-server2/"
+    assert_output --partial "no borres $SILO/demo-glusterbase.qcow2"
+    [ -e "$SILO/glusterbase.qcow2" ] && [ -e "$SILO/server1.qcow2" ]
+}
+
+@test "--prefijo no válido: error 20; sin valor: error 11" {
+    run bash "$SCRIPT" --prefijo 'demo/x' server1
+    assert_failure 20
+    run bash "$SCRIPT" server1 --prefijo
+    assert_failure 11
+}
+
 @test "--ram y --vcpus llegan a virt-install" {
     run bash "$SCRIPT" --ram 4096 --vcpus 4 server1
     assert_success

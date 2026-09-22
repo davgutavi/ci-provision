@@ -68,11 +68,14 @@ SSH_PASS=""
 NO_ROOT=false      # --no-root: root sin contraseña, como en las máquinas hechas a mano
 NO_GRAFICOS=false  # --no-virt-viewer: sin consola gráfica
 BASE_OPT=""        # --base: imagen del silo de la que hacer la copia COW
+PREFIJO_OPT=""     # --prefijo: sustituye al usuario en los nombres de lo que se crea
 
 MAQUINA=""
 IP=""
 
 # Derivados
+PREFIJO_DOMINIO=""   # delante de MAQUINA en el dominio: el usuario o --prefijo
+PREFIJO_FICHERO=""   # delante de MAQUINA en los ficheros: nada o "PREFIJO-"
 VM_NAME=""
 HOST_NAME=""
 DISCO_MAIN=""
@@ -221,6 +224,8 @@ Opciones:
                        crear, los elimina antes (solo esos; nada más), previa
                        confirmación
   --red NOMBRE         Red virtual a usar (por defecto se busca ${USUARIO}-red)
+  --prefijo PREFIJO    Sustituye a tu usuario en los nombres: dominio PREFIJO-MAQUINA
+                       y, en ese caso, también los discos (PREFIJO-MAQUINA.qcow2)
   --disco NOMBRE       Nombre del disco principal (por defecto MAQUINA.qcow2)
   --tam TAMAÑO         Tamaño del disco principal (por defecto ${TAM_DISCO_DEFECTO})
   --ram MB             Memoria (por defecto ${RAM_MB_DEFECTO}; en el clúster, ${CLUSTER_RAM_MB} por nodo)
@@ -267,7 +272,7 @@ parse_args() {
             --no-wait)         NO_WAIT=true;     shift ;;
             --no-root)         NO_ROOT=true;     shift ;;
             --no-virt-viewer)  NO_GRAFICOS=true; shift ;;
-            --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass)
+            --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass|--prefijo)
                 if [[ $# -lt 2 ]]; then
                     error 11 "Falta el valor de la opción $1"
                 fi
@@ -279,6 +284,7 @@ parse_args() {
                     --ram)      RAM_OPT="$2"   ;;
                     --vcpus)    VCPUS_OPT="$2" ;;
                     --ssh-pass) SSH_PASS="$2"  ;;
+                    --prefijo)  PREFIJO_OPT="$2" ;;
                 esac
                 shift 2
                 ;;
@@ -385,6 +391,10 @@ Solo letras, números y guiones, empezando por letra o número (p.ej. server1, g
         BASE_IMG="${SILO_DIR}/${BASE_OPT}"
     fi
 
+    if [[ -n "$PREFIJO_OPT" ]] && ! [[ "$PREFIJO_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+        error 20 "El prefijo '$PREFIJO_OPT' no es válido. Solo letras, números y guiones, p.ej. demo."
+    fi
+
     # La contraseña se teclea en la consola de la máquina virtual, cuyo teclado
     # no tiene por qué corresponderse con el del alumno. El manual ya advierte
     # de no usar tildes ni caracteres del alfabeto español.
@@ -397,10 +407,15 @@ Usa solo letras sin tilde, números y signos básicos."
     ########################################
     # Derivados
     ########################################
+    # Sin --prefijo: dominio USUARIO-MAQUINA y ficheros MAQUINA.qcow2, como en el
+    # manual. Con él, el prefijo va también en los ficheros, para que dos juegos
+    # de máquinas convivan en el mismo silo sin pisarse.
+    PREFIJO_DOMINIO="${PREFIJO_OPT:-$USUARIO}"
+    PREFIJO_FICHERO="${PREFIJO_OPT:+${PREFIJO_OPT}-}"
     if ! $CLUSTER; then
-        VM_NAME="${USUARIO}-${MAQUINA}"
+        VM_NAME="${PREFIJO_DOMINIO}-${MAQUINA}"
         HOST_NAME="$MAQUINA"
-        DISCO_MAIN="${SILO_DIR}/${DISCO_OPT:-${MAQUINA}.qcow2}"
+        DISCO_MAIN="${SILO_DIR}/${DISCO_OPT:-${PREFIJO_FICHERO}${MAQUINA}.qcow2}"
     fi
 }
 
@@ -603,7 +618,7 @@ ejecutar_maquina() {
 
     if $EXTRA_DISKS; then
         for unidad in "${UNIDADES_EXTRA[@]}"; do
-            extras+=( "${SILO_DIR}/${MAQUINA}-${unidad}.qcow2" )
+            extras+=( "${SILO_DIR}/${PREFIJO_FICHERO}${MAQUINA}-${unidad}.qcow2" )
         done
     fi
 

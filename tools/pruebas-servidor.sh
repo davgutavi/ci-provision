@@ -168,12 +168,14 @@ fase_a() {
     espera_codigo 0  "--dry-run --limpiar --gluster-cluster (solo enumera)" --dry-run --limpiar --gluster-cluster
     salida="$(ejecutar_script --dry-run --limpiar --no-virt-viewer pruebas1 2>&1)"
     grep -q -- '--graphics none' <<< "$salida" && ok "--dry-run --no-virt-viewer: el comando lleva --graphics none" || ko "--no-virt-viewer no cambia --graphics"
+    salida="$(ejecutar_script --dry-run --prefijo demo pruebas1 2>&1)"
+    grep -q -- '--name demo-pruebas1' <<< "$salida" && grep -q 'demo-pruebas1.qcow2' <<< "$salida" && ok "--dry-run --prefijo demo: dominio y disco con prefijo" || ko "--prefijo no se aplica a dominio y disco"
 
     comprueba "el --dry-run no ha creado ningún disco" bash -c "[ ! -e '$SILO/pruebas1.qcow2' ] && [ ! -e '$SILO/pruebas1-vdb.qcow2' ]"
     comprueba "el --dry-run no ha creado ningún dominio" bash -c "! virsh dominfo '${USUARIO}-pruebas1' >/dev/null 2>&1"
     comprueba "el --dry-run escribe en un directorio .dry-run con permisos 700" \
         bash -c "[ \"\$(stat -c %a '$SILO/cloudinit-${USUARIO}-pruebas1.dry-run')\" = 700 ]"
-    rm -rf "$SILO"/cloudinit-"${USUARIO}"-*.dry-run
+    rm -rf "$SILO"/cloudinit-"${USUARIO}"-*.dry-run "$SILO"/cloudinit-demo-*.dry-run
 
     echo
     echo "  Revisa a mano estos dos mensajes (deben citar la pasarela y las IPs libres de TU red):"

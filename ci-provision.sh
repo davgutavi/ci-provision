@@ -1094,7 +1094,7 @@ quitar_dominio_creado() {
 discos_extra_nodo() {
     local host="$1" u
     for u in "${UNIDADES_CLUSTER[@]}"; do
-        echo "${SILO_DIR}/${host}-${u}.qcow2"
+        echo "${SILO_DIR}/${PREFIJO_FICHERO}${host}-${u}.qcow2"
     done
 }
 
@@ -1104,7 +1104,7 @@ disco_base_cluster() {
     if [[ -n "$BASE_OPT" ]]; then
         echo "${SILO_DIR}/${BASE_OPT}"
     else
-        echo "${SILO_DIR}/${CLUSTER_BASE}.qcow2"
+        echo "${SILO_DIR}/${PREFIJO_FICHERO}${CLUSTER_BASE}.qcow2"
     fi
 }
 
@@ -1114,12 +1114,12 @@ objetivos_cluster() {
     OBJ_DOMINIOS=()
     OBJ_FICHEROS=()
     if [[ -z "$BASE_OPT" ]]; then
-        OBJ_DOMINIOS+=( "${USUARIO}-${CLUSTER_BASE}" )
-        OBJ_FICHEROS+=( "${SILO_DIR}/${CLUSTER_BASE}.qcow2" )
+        OBJ_DOMINIOS+=( "${PREFIJO_DOMINIO}-${CLUSTER_BASE}" )
+        OBJ_FICHEROS+=( "${SILO_DIR}/${PREFIJO_FICHERO}${CLUSTER_BASE}.qcow2" )
     fi
     for host in "${CLUSTER_NODOS[@]}"; do
-        OBJ_DOMINIOS+=( "${USUARIO}-${host}" )
-        OBJ_FICHEROS+=( "${SILO_DIR}/${host}.qcow2" )
+        OBJ_DOMINIOS+=( "${PREFIJO_DOMINIO}-${host}" )
+        OBJ_FICHEROS+=( "${SILO_DIR}/${PREFIJO_FICHERO}${host}.qcow2" )
         while IFS= read -r d; do
             OBJ_FICHEROS+=( "$d" )
         done < <(discos_extra_nodo "$host")
@@ -1168,7 +1168,7 @@ Puedes verlo con: virsh console $vm  (root, contraseña ${PASS_CONSOLA}) y cloud
 }
 
 mostrar_plan_cluster() {
-    local base_vm="${USUARIO}-${CLUSTER_BASE}"
+    local base_vm="${PREFIJO_DOMINIO}-${CLUSTER_BASE}"
     local base_disco i host vm
     base_disco="$(disco_base_cluster)"
 
@@ -1176,10 +1176,13 @@ mostrar_plan_cluster() {
     echo
     echo "✔ Validaciones superadas."
     echo "    Usuario : $USUARIO"
+    if [[ -n "$PREFIJO_OPT" ]]; then
+        echo "    Prefijo : $PREFIJO_OPT (sustituye al usuario en los dominios y en los discos)"
+    fi
     echo "    Red     : $NET_NAME (pasarela $NET_GATEWAY, prefijo /$NET_PREFIX)"
     echo "    Nodos   :"
     for i in "${!CLUSTER_NODOS[@]}"; do
-        echo "      ${USUARIO}-${CLUSTER_NODOS[$i]}  →  ${CLUSTER_IPS[$i]}"
+        echo "      ${PREFIJO_DOMINIO}-${CLUSTER_NODOS[$i]}  →  ${CLUSTER_IPS[$i]}"
     done
     echo "    Recursos: ${RAM_MB} MB y ${VCPUS} vCPU por máquina"
     avisar_imagen_falta
@@ -1204,16 +1207,16 @@ mostrar_plan_cluster() {
     echo "    ${UNIDADES_CLUSTER[0]}, ${UNIDADES_CLUSTER[1]} y ${UNIDADES_CLUSTER[2]} en xfs, montados en ${CLUSTER_MONTAJES[*]}; el resto sin formatear."
     for i in "${!CLUSTER_NODOS[@]}"; do
         host="${CLUSTER_NODOS[$i]}"
-        vm="${USUARIO}-${host}"
+        vm="${PREFIJO_DOMINIO}-${host}"
         generar_cloudinit "$vm" "$host" "${CLUSTER_IPS[$i]}" nodo
-        echo "    $vm: disco ${host}.qcow2 (COW de $(basename "$base_disco")), IP ${CLUSTER_IPS[$i]}, cloud-init en $WORKDIR/"
+        echo "    $vm: disco ${PREFIJO_FICHERO}${host}.qcow2 (COW de $(basename "$base_disco")), IP ${CLUSTER_IPS[$i]}, cloud-init en $WORKDIR/"
     done
     echo
     echo "    Comando del primer nodo (los demás son iguales, con su nombre, IP y discos):"
     local -a extras=()
     while IFS= read -r i; do extras+=( "$i" ); done < <(discos_extra_nodo "${CLUSTER_NODOS[0]}")
-    generar_cloudinit "${USUARIO}-${CLUSTER_NODOS[0]}" "${CLUSTER_NODOS[0]}" "${CLUSTER_IPS[0]}" nodo
-    construir_comando "${USUARIO}-${CLUSTER_NODOS[0]}" "$RAM_MB" "$VCPUS" "${SILO_DIR}/${CLUSTER_NODOS[0]}.qcow2" "${extras[@]}"
+    generar_cloudinit "${PREFIJO_DOMINIO}-${CLUSTER_NODOS[0]}" "${CLUSTER_NODOS[0]}" "${CLUSTER_IPS[0]}" nodo
+    construir_comando "${PREFIJO_DOMINIO}-${CLUSTER_NODOS[0]}" "$RAM_MB" "$VCPUS" "${SILO_DIR}/${PREFIJO_FICHERO}${CLUSTER_NODOS[0]}.qcow2" "${extras[@]}"
     imprimir_comando | sed 's/^/    /'
     echo
     echo "No se ha creado ni modificado ninguna máquina, disco ni red."
@@ -1229,7 +1232,7 @@ print_summary_cluster() {
     echo "Nodos        :"
     for i in "${!CLUSTER_NODOS[@]}"; do
         host="${CLUSTER_NODOS[$i]}"
-        vm="${USUARIO}-${host}"
+        vm="${PREFIJO_DOMINIO}-${host}"
         ip="${IPS_DETECTADAS[$vm]:-${CLUSTER_IPS[$i]}}"
         printf '  %-28s %-16s hostname %s\n' "$vm" "$ip" "$host"
     done
@@ -1245,12 +1248,12 @@ print_summary_cluster() {
         echo "                                        (o con la contraseña: $SSH_PASS)"
     fi
     if $NO_ROOT; then
-        echo "  virsh console ${USUARIO}-server1        (root sin contraseña: --no-root)"
+        echo "  virsh console ${PREFIJO_DOMINIO}-server1        (root sin contraseña: --no-root)"
     else
-        echo "  virsh console ${USUARIO}-server1        root, contraseña: $PASS_CONSOLA"
+        echo "  virsh console ${PREFIJO_DOMINIO}-server1        root, contraseña: $PASS_CONSOLA"
     fi
     if ! $NO_GRAFICOS; then
-        echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system ${USUARIO}-server1"
+        echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system ${PREFIJO_DOMINIO}-server1"
     fi
     echo
     echo "IMPORTANTE: no borres $base_disco."
@@ -1259,7 +1262,7 @@ print_summary_cluster() {
 }
 
 ejecutar_cluster() {
-    local base_vm="${USUARIO}-${CLUSTER_BASE}"
+    local base_vm="${PREFIJO_DOMINIO}-${CLUSTER_BASE}"
     local base_disco i host vm ip disco d
     local -a extras nodos_vm=()
     base_disco="$(disco_base_cluster)"
@@ -1290,9 +1293,9 @@ ejecutar_cluster() {
     echo "═══ Fase 2 de 2: ${#CLUSTER_NODOS[@]} nodos ═══"
     for i in "${!CLUSTER_NODOS[@]}"; do
         host="${CLUSTER_NODOS[$i]}"
-        vm="${USUARIO}-${host}"
+        vm="${PREFIJO_DOMINIO}-${host}"
         ip="${CLUSTER_IPS[$i]}"
-        disco="${SILO_DIR}/${host}.qcow2"
+        disco="${SILO_DIR}/${PREFIJO_FICHERO}${host}.qcow2"
         extras=()
         while IFS= read -r d; do extras+=( "$d" ); done < <(discos_extra_nodo "$host")
 
@@ -1399,11 +1402,14 @@ SSH_PASS=""
 NO_ROOT=false      # --no-root: root sin contraseña, como en las máquinas hechas a mano
 NO_GRAFICOS=false  # --no-virt-viewer: sin consola gráfica
 BASE_OPT=""        # --base: imagen del silo de la que hacer la copia COW
+PREFIJO_OPT=""     # --prefijo: sustituye al usuario en los nombres de lo que se crea
 
 MAQUINA=""
 IP=""
 
 # Derivados
+PREFIJO_DOMINIO=""   # delante de MAQUINA en el dominio: el usuario o --prefijo
+PREFIJO_FICHERO=""   # delante de MAQUINA en los ficheros: nada o "PREFIJO-"
 VM_NAME=""
 HOST_NAME=""
 DISCO_MAIN=""
@@ -1546,6 +1552,8 @@ Opciones:
                        crear, los elimina antes (solo esos; nada más), previa
                        confirmación
   --red NOMBRE         Red virtual a usar (por defecto se busca ${USUARIO}-red)
+  --prefijo PREFIJO    Sustituye a tu usuario en los nombres: dominio PREFIJO-MAQUINA
+                       y, en ese caso, también los discos (PREFIJO-MAQUINA.qcow2)
   --disco NOMBRE       Nombre del disco principal (por defecto MAQUINA.qcow2)
   --tam TAMAÑO         Tamaño del disco principal (por defecto ${TAM_DISCO_DEFECTO})
   --ram MB             Memoria (por defecto ${RAM_MB_DEFECTO}; en el clúster, ${CLUSTER_RAM_MB} por nodo)
@@ -1592,7 +1600,7 @@ parse_args() {
             --no-wait)         NO_WAIT=true;     shift ;;
             --no-root)         NO_ROOT=true;     shift ;;
             --no-virt-viewer)  NO_GRAFICOS=true; shift ;;
-            --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass)
+            --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass|--prefijo)
                 if [[ $# -lt 2 ]]; then
                     error 11 "Falta el valor de la opción $1"
                 fi
@@ -1604,6 +1612,7 @@ parse_args() {
                     --ram)      RAM_OPT="$2"   ;;
                     --vcpus)    VCPUS_OPT="$2" ;;
                     --ssh-pass) SSH_PASS="$2"  ;;
+                    --prefijo)  PREFIJO_OPT="$2" ;;
                 esac
                 shift 2
                 ;;
@@ -1710,6 +1719,10 @@ Solo letras, números y guiones, empezando por letra o número (p.ej. server1, g
         BASE_IMG="${SILO_DIR}/${BASE_OPT}"
     fi
 
+    if [[ -n "$PREFIJO_OPT" ]] && ! [[ "$PREFIJO_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+        error 20 "El prefijo '$PREFIJO_OPT' no es válido. Solo letras, números y guiones, p.ej. demo."
+    fi
+
     # La contraseña se teclea en la consola de la máquina virtual, cuyo teclado
     # no tiene por qué corresponderse con el del alumno. El manual ya advierte
     # de no usar tildes ni caracteres del alfabeto español.
@@ -1722,10 +1735,15 @@ Usa solo letras sin tilde, números y signos básicos."
     ########################################
     # Derivados
     ########################################
+    # Sin --prefijo: dominio USUARIO-MAQUINA y ficheros MAQUINA.qcow2, como en el
+    # manual. Con él, el prefijo va también en los ficheros, para que dos juegos
+    # de máquinas convivan en el mismo silo sin pisarse.
+    PREFIJO_DOMINIO="${PREFIJO_OPT:-$USUARIO}"
+    PREFIJO_FICHERO="${PREFIJO_OPT:+${PREFIJO_OPT}-}"
     if ! $CLUSTER; then
-        VM_NAME="${USUARIO}-${MAQUINA}"
+        VM_NAME="${PREFIJO_DOMINIO}-${MAQUINA}"
         HOST_NAME="$MAQUINA"
-        DISCO_MAIN="${SILO_DIR}/${DISCO_OPT:-${MAQUINA}.qcow2}"
+        DISCO_MAIN="${SILO_DIR}/${DISCO_OPT:-${PREFIJO_FICHERO}${MAQUINA}.qcow2}"
     fi
 }
 
@@ -1928,7 +1946,7 @@ ejecutar_maquina() {
 
     if $EXTRA_DISKS; then
         for unidad in "${UNIDADES_EXTRA[@]}"; do
-            extras+=( "${SILO_DIR}/${MAQUINA}-${unidad}.qcow2" )
+            extras+=( "${SILO_DIR}/${PREFIJO_FICHERO}${MAQUINA}-${unidad}.qcow2" )
         done
     fi
 

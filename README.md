@@ -381,7 +381,7 @@ base y cada nodo).
 | **14** | Contraseña con caracteres no ASCII | Sin tildes ni `ñ`: no podrías teclearla en la consola |
 | **15** | Tamaño de disco no válido | Formato `40G`, `20G`, `512M` |
 | **16** | Nombre de disco o de imagen no válido | Solo el nombre del fichero, sin rutas |
-| **20** | Nombre de máquina no válido | Solo letras, números y guiones |
+| **20** | Nombre de máquina o prefijo (`--prefijo`) no válido | Solo letras, números y guiones |
 | **21** | Ya existe el dominio o algún disco | El mensaje indica cómo eliminarlos, o usa `--limpiar` |
 | **30** | No existe el silo | Crear `$HOME/imagenesMV` y mapearlo en el hipervisor |
 | **31** | No existe la clave pública | `ssh-keygen` |
@@ -409,6 +409,7 @@ No las necesitas en los [casos de uso](#casos-de-uso).
 | `--dry-run` | Comprueba los datos y muestra lo que se haría, **sin crear nada** |
 | `--no-wait` | No espera a que la máquina termine de configurarse (no válida con `--glusterfs`) |
 | `--red NOMBRE` | Red virtual a usar, si no se llama `TU_USUARIO-red` o tienes varias |
+| `--prefijo PREFIJO` | Sustituye a tu usuario en los nombres de todo lo que crea el script (dominios y discos). Ver abajo |
 | `--disco NOMBRE` | Nombre del disco principal (por defecto `MAQUINA.qcow2`) |
 | `--tam TAMAÑO` | Tamaño del disco principal (por defecto `40G`) |
 | `--ram MB` | Memoria (por defecto 2048; en el clúster, 1024 por nodo) |
@@ -437,6 +438,23 @@ Devuelve el control en cuanto la máquina está creada. Ten en cuenta que entonc
 la máquina **seguirá configurándose por dentro** durante un rato: si entras
 enseguida, puede que los paquetes instalados por cloud-init todavía no estén
 disponibles.
+
+### `--prefijo`
+
+Por defecto las máquinas se llaman `TU_USUARIO-MAQUINA` y los discos `MAQUINA.qcow2`.
+Con `--prefijo PREFIJO`, el prefijo sustituye a tu usuario en **todo lo que crea el
+script**: dominios `PREFIJO-MAQUINA`, discos `PREFIJO-MAQUINA.qcow2` y
+`PREFIJO-MAQUINA-vdb.qcow2`, imagen base `PREFIJO-glusterbase.qcow2` y directorios
+`cloudinit-PREFIJO-*`. Así puedes tener dos juegos de máquinas en el mismo silo sin
+que se pisen, y `--limpiar` nunca toca los del otro prefijo. El hostname (`server1`) y
+la red no cambian.
+
+```bash
+./ci-provision.sh --prefijo demo --gluster-cluster
+```
+
+crea `demo-glusterbase.qcow2` y `demo-server1`..`demo-server4` (con `demo-server1.qcow2`,
+`demo-server1-vdb.qcow2`, etc.) dejando intactos tus `TU_USUARIO-server1`..`4`.
 
 ---
 
