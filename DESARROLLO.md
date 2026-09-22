@@ -16,6 +16,8 @@ lib/cloudinit.sh     Ficheros cloud-init y expulsión del medio
 lib/discos.sh        Creación de discos
 lib/espera.sh        Espera a que cloud-init termine
 lib/cluster.sh       Imagen base GlusterFS y --gluster-cluster
+lib/gestion.sh       --listar, --eliminar y --eliminar-todo
+lib/asistente.sh     Asistente con menús (--menu), sobre whiptail
 ```
 
 Tras modificar cualquiera de ellos, regenera el script distribuible:
@@ -30,7 +32,7 @@ fuentes, así que no se puede olvidar.
 ## Tests locales (sin libvirt)
 
 Usan [bats](https://github.com/bats-core/bats-core), incluido como submódulo,
-con un `virsh`, un `virt-install` y un `wget` simulados (`test/mocks/`) y un
+con un `virsh`, un `virt-install`, un `wget` y un `whiptail` simulados (`test/mocks/`) y un
 `HOME` de mentira. Clona con:
 
 ```bash

@@ -737,6 +737,64 @@ qinfo() {
     assert_failure 22
 }
 
+@test "--menu: el asistente construye el comando, lo ejecuta y vuelve al menú" {
+    export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
+    printf '%s\n' "0 basica" "0 server1" "0 " "0 \"extra-disks\" \"no-root\"" "0" "0 salir" > "$MOCK_WHIPTAIL"
+    run bash "$SCRIPT" --menu </dev/null
+    assert_success
+    assert_output --partial "→ $SCRIPT --extra-disks --no-root server1"
+    assert_output --partial "Sin cambios."
+    dominio_existe "${USUARIO}-server1"
+    [ -e "$SILO/server1-vdg.qcow2" ]
+    [ "$(llamadas '^whiptail --title')" -eq 6 ]
+}
+
+@test "--menu: cancelar en el menú principal no hace nada" {
+    export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
+    printf '%s\n' "1" > "$MOCK_WHIPTAIL"
+    run bash "$SCRIPT" --menu </dev/null
+    assert_success
+    assert_output --partial "Sin cambios."
+    [ "$(llamadas '^virt-install')" -eq 0 ]
+}
+
+@test "--menu: SERVER1 sugiere la IP .2 con los discos extra marcados; eliminar elige de la lista" {
+    export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
+    printf '%s\n' "0 server1" "0 192.168.7.2" "0 \"extra-disks\"" "0" "0 eliminar" "0 \"server1\"" "0" "1" > "$MOCK_WHIPTAIL"
+    run bash "$SCRIPT" --menu </dev/null
+    assert_success
+    grep -q -- ' 16 70 192.168.7.2$' "$MOCK_STATE/log"
+    grep -q -- 'extra-disks Seis discos extra vdb..vdg de 40G on ' "$MOCK_STATE/log"
+    assert_output --partial "→ $SCRIPT --extra-disks server1 192.168.7.2"
+    assert_output --partial "→ $SCRIPT --eliminar server1"
+    grep -q -- '--checklist .* server1 en ejecución off' "$MOCK_STATE/log"
+    ! dominio_existe "${USUARIO}-server1"
+    [ ! -e "$SILO/server1-vdb.qcow2" ]
+}
+
+@test "--menu: la contraseña no se muestra en el comando; sin whiptail, error 38; sin más opciones" {
+    export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
+    printf '%s\n' "0 basica" "0 web" "0 " "0 \"ssh-pass\"" "0 Secreta1" "0" "1" > "$MOCK_WHIPTAIL"
+    run bash "$SCRIPT" --menu </dev/null
+    assert_success
+    assert_output --partial "→ $SCRIPT --ssh-pass •••••• web"
+    refute_output --partial "--ssh-pass Secreta1"
+    grep -q "administrador:Secreta1" "$SILO/cloudinit-${USUARIO}-web/cip-user.yaml"
+
+    local bin="$BATS_TEST_TMPDIR/bin"
+    mkdir -p "$bin"
+    ln -s "$REPO_DIR/test/mocks/virsh" "$bin/virsh"
+    ln -s "$REPO_DIR/test/mocks/virt-install" "$bin/virt-install"
+    ln -s "$REPO_DIR/test/mocks/wget" "$bin/wget"
+    PATH="$bin:${PATH#"$REPO_DIR/test/mocks:"}" run bash "$SCRIPT" --menu
+    assert_failure 38
+    assert_output --partial "whiptail"
+    run bash "$SCRIPT" --menu server1
+    assert_failure 10
+    run bash "$SCRIPT" --menu --extra-disks
+    assert_failure 10
+}
+
 @test "--ram y --vcpus llegan a virt-install" {
     run bash "$SCRIPT" --ram 4096 --vcpus 4 server1
     assert_success

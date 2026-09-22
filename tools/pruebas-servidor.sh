@@ -152,6 +152,7 @@ fase_a() {
     espera_codigo 11 "--ssh-pass seguido de otra opción"       --dry-run --ssh-pass --extra-disks pruebas1
     espera_codigo 10 "--glusterfs con --extra-disks"           --dry-run --glusterfs --extra-disks pruebasgluster
     espera_codigo 20 "nombre con el usuario delante"           --dry-run "${USUARIO}-pruebas1"
+    espera_codigo 10 "--menu con MAQUINA"                      --menu pruebas1
     espera_codigo 12 "opción desconocida"                      --noexiste pruebas1
     espera_codigo 11 "opción sin valor"                        pruebas1 --ram
     espera_codigo 20 "nombre de máquina inválido"              "a b"

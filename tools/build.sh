@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT_DIR/ci-provision.sh}"
 
 # Librerías, en el orden en que las carga src/main.sh
-LIBS=(validations limpieza cloudinit discos espera cluster gestion)
+LIBS=(validations limpieza cloudinit discos espera cluster gestion asistente)
 
 echo "Generando script standalone en: $OUT"
 

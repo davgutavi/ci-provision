@@ -474,7 +474,7 @@ Crea ese directorio y mapéalo como silo en el hipervisor."
     fi
 
     # Los modos de gestión no crean nada: no necesitan clave, red ni imagen
-    if $LISTAR || $ELIMINAR || $ELIMINAR_TODO; then
+    if $LISTAR || $ELIMINAR || $ELIMINAR_TODO || $MENU; then
         return 0
     fi
 

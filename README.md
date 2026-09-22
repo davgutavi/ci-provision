@@ -34,6 +34,8 @@ Todas las máquinas que crea tienen:
   si ya existen de una ejecución anterior.
 - `--listar`, `--eliminar` y `--eliminar-todo`: ver y eliminar lo que ya tienes, con sus
   discos, sin tocar nunca un disco que use otra máquina.
+- Sin argumentos (o con `--menu`): un **asistente con menús** que hace todo lo anterior
+  y te enseña el comando equivalente antes de ejecutarlo.
 
 ---
 
@@ -144,6 +146,7 @@ Ejecuta siempre desde tu silo:
 ./ci-provision.sh --listar
 ./ci-provision.sh --eliminar MAQUINA [MAQUINA...]
 ./ci-provision.sh --eliminar-todo
+./ci-provision.sh                       (asistente con menús)
 ```
 
 De `MAQUINA` (por ejemplo `server1`) salen el nombre del dominio en libvirt
@@ -172,10 +175,20 @@ De `MAQUINA` (por ejemplo `server1`) salen el nombre del dominio en libvirt
 | `--listar` | Muestra tus máquinas (estado, IP, discos) y los discos del silo que no usa ninguna |
 | `--eliminar MAQUINA...` | Elimina esas máquinas con sus discos y sus ficheros cloud-init, previa confirmación |
 | `--eliminar-todo` | Elimina todas tus máquinas con sus discos y ofrece borrar los discos que queden sin máquina |
+| `--menu` | Asistente con menús. Es lo que se abre al ejecutar el script sin argumentos |
 | `-h` | Ayuda |
 | `--version` | Versión del script |
 
 Hay más opciones para casos particulares en [opciones avanzadas](#opciones-avanzadas).
+
+### 🧭 Asistente con menús
+
+Si ejecutas el script **sin argumentos** desde el servidor (o con `--menu`), se abre
+un asistente con menús: eliges qué quieres hacer (una máquina, SERVER1 del boletín 2,
+la infraestructura GlusterFS, solo la imagen base, ver o eliminar lo que tienes),
+rellenas el nombre, la IP (te enseña las libres de tu red) y las opciones, y antes de
+ejecutar te muestra **el comando equivalente**, que es el que aprenderás a escribir.
+Todo lo que hace el asistente se puede hacer con las opciones de la tabla anterior.
 
 ### ⏳ Qué pasa al ejecutarlo
 
@@ -434,7 +447,7 @@ esos directorios los puedes borrar cuando quieras.
 | **30** | No existe el silo | Crear `$HOME/imagenesMV` y mapearlo en el hipervisor |
 | **31** | No existe la clave pública, o el fichero no contiene una sola clave | `ssh-keygen` |
 | **37** | No se ha podido descargar la imagen base, o la que hay está corrupta | El mensaje indica el `wget` manual, o el `rm` para que el script la vuelva a descargar |
-| **38** | Faltan herramientas (incluido `wget`/`curl` para descargar la imagen) o no hay conexión con libvirt | Avisar al profesor |
+| **38** | Faltan herramientas (incluido `wget`/`curl` para descargar la imagen, o `whiptail` para `--menu`) o no hay conexión con libvirt | Avisar al profesor |
 | **39** | La imagen indicada con `--base` no existe o no es un `qcow2` | Revisa el nombre; debe estar en el silo |
 | **40** | No se encuentra tu red virtual | Créala con el nombre `TU_USUARIO-red`, o usa `--red` |
 | **41** | IP no válida o fuera de tu red | El mensaje indica las IPs libres de tu red |

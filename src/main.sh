@@ -5,7 +5,7 @@ set -euo pipefail
 # configurado en el servidor.
 export LC_ALL=C
 
-VERSION="2.2.0"
+VERSION="2.3.0"
 
 ########################################
 # Configuración general
@@ -63,6 +63,7 @@ NO_WAIT=false
 LISTAR=false        # --listar
 ELIMINAR=false      # --eliminar MAQUINA...
 ELIMINAR_TODO=false # --eliminar-todo
+MENU=false          # --menu: asistente con whiptail
 NOMBRES=()          # --eliminar: máquinas a eliminar
 
 RED_OPT=""
@@ -211,6 +212,7 @@ Uso:
   $0 --listar
   $0 --eliminar MAQUINA [MAQUINA...]
   $0 --eliminar-todo
+  $0 --menu                  (asistente con menús; también al ejecutarlo sin argumentos)
 
 Crea una máquina virtual Debian 12 con cloud-init en tu silo ($SILO_DIR).
 De MAQUINA salen el nombre del dominio (${USUARIO}-MAQUINA), el nombre de
@@ -269,6 +271,9 @@ Ver y eliminar lo que ya tienes:
   --eliminar-todo      Elimina todas tus máquinas (las ${USUARIO}-*) con sus discos y
                        ofrece borrar los discos del silo que queden sin máquina.
   --version            Muestra la versión del script
+  --menu               Asistente con menús para hacer todo lo anterior sin tener que
+                       recordar las opciones. Es lo que se abre al ejecutar el script
+                       sin argumentos desde una terminal.
 
 En todas las máquinas:
   - Usuario 'administrador' con tu clave pública ($PUBKEY_PATH) y
@@ -307,6 +312,7 @@ parse_args() {
             --listar)          LISTAR=true;        shift ;;
             --eliminar)        ELIMINAR=true;      shift ;;
             --eliminar-todo)   ELIMINAR_TODO=true; shift ;;
+            --menu)            MENU=true;          shift ;;
             --version)
                 echo "ci-provision.sh $VERSION"
                 exit 0
@@ -370,16 +376,16 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
     # Modos de gestión: --listar, --eliminar, --eliminar-todo
     ########################################
     local modos=0 m
-    for m in $CLUSTER $LISTAR $ELIMINAR $ELIMINAR_TODO; do
+    for m in $CLUSTER $LISTAR $ELIMINAR $ELIMINAR_TODO $MENU; do
         if [[ "$m" == true ]]; then modos=$(( modos + 1 )); fi
     done
     if (( modos > 1 )); then
-        error 10 "--gluster-cluster, --listar, --eliminar y --eliminar-todo son modos distintos: usa solo uno."
+        error 10 "--gluster-cluster, --listar, --eliminar, --eliminar-todo y --menu son modos distintos: usa solo uno."
     fi
-    if $LISTAR || $ELIMINAR || $ELIMINAR_TODO; then
+    if $LISTAR || $ELIMINAR || $ELIMINAR_TODO || $MENU; then
         if $EXTRA_DISKS || $GLUSTERFS || $LIMPIAR || $NO_WAIT || $NO_ROOT || $NO_GRAFICOS || \
            [[ -n "$RED_OPT$DISCO_OPT$BASE_OPT$RAM_OPT$VCPUS_OPT$SSH_PASS" ]] || [[ "$TAM_DISCO" != "$TAM_DISCO_DEFECTO" ]]; then
-            error 10 "Con --listar, --eliminar y --eliminar-todo solo se admiten --prefijo y --dry-run."
+            error 10 "Con --listar, --eliminar, --eliminar-todo y --menu solo se admiten --prefijo y --dry-run."
         fi
         if $ELIMINAR; then
             if (( ${#args[@]} == 0 )); then
@@ -397,7 +403,7 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
                 fi
             done
         elif (( ${#args[@]} > 0 )); then
-            error 10 "--listar y --eliminar-todo no llevan MAQUINA (sobra: '${args[*]}')."
+            error 10 "--listar, --eliminar-todo y --menu no llevan MAQUINA (sobra: '${args[*]}')."
         fi
     fi
 
@@ -417,13 +423,14 @@ cuando cloud-init termine, así que es imprescindible esperar."
             error 10 "--gluster-cluster ya construye la imagen base y los ${#UNIDADES_CLUSTER[@]} discos de cada nodo:
 no se combina con --glusterfs ni con --extra-disks."
         fi
-    elif $LISTAR || $ELIMINAR || $ELIMINAR_TODO; then
+    elif $LISTAR || $ELIMINAR || $ELIMINAR_TODO || $MENU; then
         :
     else
         if (( ${#args[@]} == 0 )); then
             error 10 "Falta el nombre de la máquina.
 Uso: $0 [opciones] MAQUINA [IP]      (p.ej. $0 server1)
-Consulta la ayuda con -h."
+Consulta la ayuda con -h. En el servidor de la asignatura también puedes
+ejecutarlo sin argumentos desde una terminal: se abre un asistente con menús."
         fi
         if (( ${#args[@]} > 2 )); then
             error 10 "Sobran parámetros: '${args[*]}'.
@@ -831,10 +838,21 @@ Elige otro nombre para el disco principal."
 # MAIN
 ########################################
 main() {
+    # Sin argumentos y desde una terminal: el asistente con menús
+    if (( $# == 0 )) && [[ -t 0 && -t 1 ]] && command -v whiptail >/dev/null 2>&1; then
+        set -- --menu
+    fi
+
     parse_args "$@"
     validar_entorno
 
-    if $LISTAR; then
+    if $MENU; then
+        if ! command -v whiptail >/dev/null 2>&1; then
+            error 38 "El asistente (--menu) necesita el programa 'whiptail', que no está en este equipo
+(en los servidores de la asignatura sí está). Usa las opciones de la línea de comandos: $0 -h"
+        fi
+        asistente
+    elif $LISTAR; then
         listar_maquinas
     elif $ELIMINAR; then
         eliminar_maquinas "${NOMBRES[@]}"
