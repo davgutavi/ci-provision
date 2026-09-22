@@ -1850,10 +1850,11 @@ eliminar_todo() {
 ########################################
 
 # Ejecuta whiptail y devuelve su selección por stdout (whiptail la escribe por
-# stderr). Estado: 0 aceptar, 1 cancelar, 255 Esc.
+# stderr). Estado: 0 aceptar, 1 cancelar, 255 Esc. Va con locale UTF-8: con
+# LC_ALL=C (la del resto del script) whiptail corta los textos en las tildes.
 wt() {
     local out rc=0
-    out="$(whiptail --title "ci-provision $VERSION" "$@" 3>&1 1>&2 2>&3)" || rc=$?
+    out="$(LC_ALL="$LOCALE_UTF8" whiptail --title "ci-provision $VERSION" "$@" 3>&1 1>&2 2>&3)" || rc=$?
     printf '%s' "$out"
     return "$rc"
 }
@@ -2060,6 +2061,14 @@ ejecutar_asistente() {   # [--directo] ARGUMENTO...
     read -r -p "Pulsa Enter para volver al menú… " pausa || true
 }
 
+
+# Los diálogos de whiptail necesitan una locale UTF-8 (si no, cortan los
+# textos en la primera tilde): la del usuario si lo es, o C.UTF-8
+LOCALE_UTF8="${LC_ALL:-${LANG:-}}"
+case "${LOCALE_UTF8,,}" in
+    *utf-8*|*utf8*) ;;
+    *) LOCALE_UTF8="C.UTF-8" ;;
+esac
 
 # Salidas de las herramientas en formato neutro, independiente del idioma
 # configurado en el servidor.

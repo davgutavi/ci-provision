@@ -8,6 +8,12 @@
 S="${MOCK_STATE:?MOCK_STATE no definido}"
 echo "whiptail $*" >> "$S/log"
 
+# Como el whiptail real: sin locale UTF-8 los textos con tildes salen cortados
+case "${LC_ALL:-}" in
+    *UTF-8*|*utf-8*|*utf8*|*UTF8*) ;;
+    *) echo "mock whiptail: se ha llamado sin locale UTF-8 (LC_ALL='${LC_ALL:-}')" >&2; exit 99 ;;
+esac
+
 f="${MOCK_WHIPTAIL:-}"
 if [[ -z "$f" || ! -s "$f" ]]; then
     exit 1

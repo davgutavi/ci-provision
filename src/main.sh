@@ -1,6 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
+# Los diálogos de whiptail necesitan una locale UTF-8 (si no, cortan los
+# textos en la primera tilde): la del usuario si lo es, o C.UTF-8
+LOCALE_UTF8="${LC_ALL:-${LANG:-}}"
+case "${LOCALE_UTF8,,}" in
+    *utf-8*|*utf8*) ;;
+    *) LOCALE_UTF8="C.UTF-8" ;;
+esac
+
 # Salidas de las herramientas en formato neutro, independiente del idioma
 # configurado en el servidor.
 export LC_ALL=C

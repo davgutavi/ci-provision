@@ -5,10 +5,11 @@
 ########################################
 
 # Ejecuta whiptail y devuelve su selección por stdout (whiptail la escribe por
-# stderr). Estado: 0 aceptar, 1 cancelar, 255 Esc.
+# stderr). Estado: 0 aceptar, 1 cancelar, 255 Esc. Va con locale UTF-8: con
+# LC_ALL=C (la del resto del script) whiptail corta los textos en las tildes.
 wt() {
     local out rc=0
-    out="$(whiptail --title "ci-provision $VERSION" "$@" 3>&1 1>&2 2>&3)" || rc=$?
+    out="$(LC_ALL="$LOCALE_UTF8" whiptail --title "ci-provision $VERSION" "$@" 3>&1 1>&2 2>&3)" || rc=$?
     printf '%s' "$out"
     return "$rc"
 }
