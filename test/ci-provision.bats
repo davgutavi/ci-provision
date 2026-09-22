@@ -638,6 +638,105 @@ qinfo() {
     refute_output --partial "--base"
 }
 
+@test "--version muestra la versión" {
+    run bash "$SCRIPT" --version
+    assert_success
+    assert_output --regexp '^ci-provision.sh [0-9]+\.[0-9]+\.[0-9]+$'
+}
+
+@test "--listar: máquinas con estado, IP y discos, y discos del silo sin máquina" {
+    run bash "$SCRIPT" --extra-disks server1
+    assert_success
+    run bash "$SCRIPT" --glusterfs glusterbase
+    assert_success
+    run bash "$SCRIPT" --listar
+    assert_success
+    assert_output --partial "Máquinas ${USUARIO}-* (1):"
+    assert_output --regexp "${USUARIO}-server1 +en ejecución +192\.168\.7\.[0-9]+ +server1\.qcow2 \(copia de debian12\.qcow2\) \+ 6 discos extra"
+    assert_output --partial "Discos del silo sin máquina:"
+    assert_output --regexp "glusterbase\.qcow2 +copia de debian12\.qcow2"
+    assert_output --regexp "debian12\.qcow2 +imagen cloud"
+    run bash "$SCRIPT" --listar server1
+    assert_failure 10
+    run bash "$SCRIPT" --listar --extra-disks
+    assert_failure 10
+}
+
+@test "--eliminar MAQUINA: máquina, discos y cloud-init; lo demás intacto" {
+    run bash "$SCRIPT" --extra-disks server1
+    assert_success
+    run bash "$SCRIPT" server2
+    assert_success
+    run bash "$SCRIPT" --dry-run --eliminar server1 </dev/null
+    assert_success
+    dominio_existe "${USUARIO}-server1"
+    run bash "$SCRIPT" --eliminar server1 </dev/null
+    assert_success
+    assert_output --partial "máquina ${USUARIO}-server1 eliminada"
+    ! dominio_existe "${USUARIO}-server1"
+    [ ! -e "$SILO/server1.qcow2" ] && [ ! -e "$SILO/server1-vdb.qcow2" ] && [ ! -e "$SILO/server1-vdg.qcow2" ]
+    [ ! -d "$SILO/cloudinit-${USUARIO}-server1" ]
+    dominio_existe "${USUARIO}-server2"
+    [ -e "$SILO/server2.qcow2" ] && [ -e "$SILO/debian12.qcow2" ]
+    run bash "$SCRIPT" --eliminar server9 </dev/null
+    assert_failure 22
+    run bash "$SCRIPT" --eliminar "${USUARIO}-server2"
+    assert_failure 20
+    run bash "$SCRIPT" --eliminar
+    assert_failure 10
+}
+
+@test "--eliminar conserva un disco que usa otra máquina o del que dependen copias" {
+    run bash "$SCRIPT" --disco server1.qcow2 otra
+    assert_success
+    run bash "$SCRIPT" --eliminar server1 </dev/null
+    assert_failure 22
+    assert_output --partial "lo usa la máquina '${USUARIO}-otra'"
+    dominio_existe "${USUARIO}-otra"
+    [ -e "$SILO/server1.qcow2" ]
+
+    run bash "$SCRIPT" --glusterfs glusterbase
+    assert_success
+    run bash "$SCRIPT" --base glusterbase.qcow2 nodo1
+    assert_success
+    # Solo quedan sus ficheros cloud-init por eliminar: el disco se conserva y se explica
+    run bash "$SCRIPT" --eliminar glusterbase </dev/null
+    assert_success
+    assert_output --partial "glusterbase.qcow2: es la imagen base de nodo1.qcow2"
+    [ -e "$SILO/glusterbase.qcow2" ]
+    [ ! -d "$SILO/cloudinit-${USUARIO}-glusterbase" ]
+    run bash "$SCRIPT" --eliminar nodo1 glusterbase </dev/null
+    assert_success
+    ! dominio_existe "${USUARIO}-nodo1"
+    [ ! -e "$SILO/nodo1.qcow2" ] && [ ! -e "$SILO/glusterbase.qcow2" ]
+}
+
+@test "--eliminar-todo: todas las máquinas del usuario y los discos sin máquina; nunca debian12.qcow2 ni otro prefijo" {
+    run bash "$SCRIPT" server1
+    assert_success
+    run bash "$SCRIPT" --glusterfs glusterbase
+    assert_success
+    run bash "$SCRIPT" --prefijo demo server1
+    assert_success
+    run bash "$SCRIPT" --dry-run --eliminar-todo </dev/null
+    assert_success
+    dominio_existe "${USUARIO}-server1"
+    run bash "$SCRIPT" --eliminar-todo </dev/null
+    assert_success
+    ! dominio_existe "${USUARIO}-server1"
+    [ ! -e "$SILO/server1.qcow2" ] && [ ! -e "$SILO/glusterbase.qcow2" ]
+    [ -e "$SILO/debian12.qcow2" ]
+    dominio_existe "demo-server1"
+    [ -e "$SILO/demo-server1.qcow2" ]
+    assert_output --partial "demo-server1.qcow2: lo usa la máquina 'demo-server1'"
+    run bash "$SCRIPT" --prefijo demo --eliminar-todo </dev/null
+    assert_success
+    ! dominio_existe "demo-server1"
+    [ ! -e "$SILO/demo-server1.qcow2" ]
+    run bash "$SCRIPT" --eliminar-todo </dev/null
+    assert_failure 22
+}
+
 @test "--ram y --vcpus llegan a virt-install" {
     run bash "$SCRIPT" --ram 4096 --vcpus 4 server1
     assert_success

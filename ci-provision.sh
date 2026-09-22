@@ -476,6 +476,11 @@ validar_entorno() {
 Crea ese directorio y mapéalo como silo en el hipervisor."
     fi
 
+    # Los modos de gestión no crean nada: no necesitan clave, red ni imagen
+    if $LISTAR || $ELIMINAR || $ELIMINAR_TODO; then
+        return 0
+    fi
+
     # Clave pública existente y con una sola clave: va tal cual dentro del
     # user-data, y una segunda línea (o un fichero vacío) lo dejaría inválido
     if [[ ! -f "$PUBKEY_PATH" ]]; then
@@ -525,35 +530,58 @@ Si no la tienes, genera una pareja de claves nueva con: ssh-keygen"
 OBJ_DOMINIOS=()
 OBJ_FICHEROS=()
 
-# Dominios del usuario (o del prefijo) que NO son objetivo de esta ejecución:
-# son los que pueden tener discos en este silo
+# ¿Está VALOR entre los demás argumentos?
+en_lista() {   # VALOR [ELEMENTO...]
+    local x="$1" e
+    shift
+    for e in "$@"; do
+        if [[ "$e" == "$x" ]]; then return 0; fi
+    done
+    return 1
+}
+
+# Pregunta sí/no por teclado. Sin terminal (uso desde otro script) la opción
+# ya es una petición explícita y se sigue adelante.
+confirmar() {   # PREGUNTA
+    if [[ ! -t 0 ]]; then return 0; fi
+    local respuesta
+    read -r -p "$1 [s/N] " respuesta || { respuesta=""; echo; }
+    case "$respuesta" in
+        s|S|si|sí|Si|Sí|SI|SÍ) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Dominios "vecinos": los que NO son objetivo de esta ejecución y podrían
+# estar usando ficheros de este silo. Por defecto, los del usuario (o del
+# prefijo); con 'todos', todos los del servidor. De cada uno se anotan sus
+# discos, para saber quién usa cada fichero.
 DOMINIOS_VECINOS=()
-cargar_dominios_vecinos() {
-    local lista d x pref1="${USUARIO,,}" pref2="${PREFIJO_DOMINIO,,}"
+declare -A DISCO_USADO_POR=()   # fichero → dominio vecino que lo usa
+cargar_dominios_vecinos() {   # [todos]
+    local lista d f salida todos="${1:-}" pref1="${USUARIO,,}" pref2="${PREFIJO_DOMINIO,,}"
     DOMINIOS_VECINOS=()
+    DISCO_USADO_POR=()
     lista="$(virsh list --all --name 2>/dev/null || true)"
     while IFS= read -r d; do
-        [[ -z "$d" ]] && continue
-        [[ "${d,,}" == "$pref1"* || "${d,,}" == "$pref2"* ]] || continue
-        for x in ${OBJ_DOMINIOS[@]+"${OBJ_DOMINIOS[@]}"}; do
-            [[ "$x" == "$d" ]] && continue 2
-        done
+        if [[ -z "$d" ]]; then continue; fi
+        if [[ -z "$todos" && "${d,,}" != "$pref1"* && "${d,,}" != "$pref2"* ]]; then continue; fi
+        if en_lista "$d" ${OBJ_DOMINIOS[@]+"${OBJ_DOMINIOS[@]}"}; then continue; fi
         DOMINIOS_VECINOS+=( "$d" )
+        salida="$(virsh domblklist "$d" --inactive 2>/dev/null || true)"
+        while IFS= read -r f; do
+            if [[ -n "$f" && -z "${DISCO_USADO_POR[$f]:-}" ]]; then
+                DISCO_USADO_POR[$f]="$d"
+            fi
+        done < <(awk 'NR > 2 && $2 ~ /^\// { print $2 }' <<< "$salida")
     done <<< "$lista"
 }
 
-# ¿Usa este fichero como disco alguna máquina que no se va a eliminar?
-# Devuelve su nombre por stdout.
+# ¿Usa este fichero como disco alguna máquina vecina? Devuelve su nombre.
 dominio_que_usa_disco() {   # FICHERO
-    local f="$1" d salida
-    for d in ${DOMINIOS_VECINOS[@]+"${DOMINIOS_VECINOS[@]}"}; do
-        salida="$(virsh domblklist "$d" --inactive 2>/dev/null || true)"
-        if awk -v f="$f" '$2 == f { ok = 1 } END { exit !ok }' <<< "$salida"; then
-            echo "$d"
-            return 0
-        fi
-    done
-    return 1
+    local d="${DISCO_USADO_POR[$1]:-}"
+    if [[ -z "$d" ]]; then return 1; fi
+    echo "$d"
 }
 
 # ¿Es este fichero el respaldo (imagen base) de otro qcow2 del silo que se
@@ -641,17 +669,10 @@ Elige otro nombre de máquina (o de disco, con --disco), o elimina antes esa cop
 
     # Confirmación por teclado. Si no hay terminal (uso desde otro script),
     # --limpiar ya es una petición explícita y se sigue adelante.
-    if [[ -t 0 ]]; then
-        local respuesta
-        read -r -p "¿Eliminar estos elementos? [s/N] " respuesta || { respuesta=""; echo; }
-        case "$respuesta" in
-            s|S|si|sí|Si|Sí|SI|SÍ) ;;
-            *)
-                echo "Cancelado: no se ha eliminado nada."
-                SALIDA_CONTROLADA=true
-                exit 0
-                ;;
-        esac
+    if ! confirmar "¿Eliminar estos elementos?"; then
+        echo "Cancelado: no se ha eliminado nada."
+        SALIDA_CONTROLADA=true
+        exit 0
     fi
 
     for d in ${dominios[@]+"${dominios[@]}"}; do
@@ -1374,6 +1395,9 @@ print_summary_cluster() {
     echo
     echo "IMPORTANTE: no borres $base_disco."
     echo "            Los discos de los ${#CLUSTER_NODOS[@]} nodos dependen de él."
+    echo
+    echo "Para eliminar la infraestructura entera (nodos${BASE_OPT:+ }${BASE_OPT:-e imagen base}):"
+    echo "  $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--eliminar ${CLUSTER_NODOS[*]}${BASE_OPT:+}${BASE_OPT:- $CLUSTER_BASE}"
     echo "-------------------------------------------"
 }
 
@@ -1450,10 +1474,381 @@ ejecutar_cluster() {
     avisar_known_hosts "${CLUSTER_IPS[@]}"
 }
 
+########################################
+# Ver y eliminar lo que ya existe: --listar, --eliminar y --eliminar-todo
+#
+# Todo parte de libvirt, no de los nombres: los discos de una máquina son los
+# que dice 'virsh domblklist' (solo los que están en el silo). Nunca se borra
+# un disco que use otra máquina ni una imagen de la que dependan otras copias.
+########################################
+
+# Dominios del usuario (o del prefijo): los que empiezan por PREFIJO-
+dominios_propios() {
+    local lista d
+    lista="$(virsh list --all --name 2>/dev/null || true)"
+    while IFS= read -r d; do
+        if [[ -n "$d" && "$d" == "${PREFIJO_DOMINIO}-"* ]]; then
+            echo "$d"
+        fi
+    done <<< "$lista" | sort
+}
+
+# Discos de un dominio que están en el silo (según su definición persistente)
+discos_de_dominio() {   # DOMINIO
+    local salida
+    salida="$(virsh domblklist "$1" --inactive 2>/dev/null || true)"
+    awk -v silo="$SILO_DIR/" 'NR > 2 && index($2, silo) == 1 { print $2 }' <<< "$salida"
+}
+
+estado_dominio() {   # DOMINIO
+    local s
+    s="$(virsh domstate "$1" 2>/dev/null || true)"
+    case "$s" in
+        running)    echo "en ejecución" ;;
+        "shut off") echo "apagada" ;;
+        paused)     echo "pausada" ;;
+        "")         echo "?" ;;
+        *)          echo "$s" ;;
+    esac
+}
+
+# IP de una máquina en ejecución: la que reporta el agente o, si no, la del DHCP
+ip_dominio() {   # DOMINIO
+    local ip salida
+    ip="$(obtener_ip_agente "$1")"
+    if [[ -z "$ip" ]]; then
+        salida="$(virsh domifaddr "$1" --source lease 2>/dev/null || true)"
+        ip="$(awk '$3 == "ipv4" { split($4, a, "/"); print a[1]; exit }' <<< "$salida")"
+    fi
+    echo "${ip:--}"
+}
+
+# Imagen de la que es copia un qcow2 (solo el nombre), o nada
+respaldo_de() {   # FICHERO
+    local b
+    b="$(qemu-img info -U --output=json "$1" 2>/dev/null | jq -r '."backing-filename" // empty' 2>/dev/null || true)"
+    if [[ -n "$b" ]]; then
+        basename "$b"
+    fi
+}
+
+# Copias del silo que dependen de un fichero: "a.qcow2, b.qcow2"
+copias_de() {   # FICHERO
+    local o b res=""
+    for o in "$SILO_DIR"/*.qcow2; do
+        if [[ ! -f "$o" || "$o" == "$1" ]]; then continue; fi
+        b="$(respaldo_de "$o")"
+        if [[ -n "$b" && "$b" == "$(basename "$1")" ]]; then
+            res+="${res:+, }$(basename "$o")"
+        fi
+    done
+    echo "$res"
+}
+
+# Ficheros qcow2 del silo que no usa ninguna de las máquinas del usuario
+discos_sin_maquina() {
+    local f d usados=""
+    for d in $(dominios_propios); do
+        usados+="$(discos_de_dominio "$d")"$'\n'
+    done
+    for f in "$SILO_DIR"/*.qcow2; do
+        if [[ -f "$f" ]] && ! grep -qxF "$f" <<< "$usados"; then
+            echo "$f"
+        fi
+    done
+}
+
+########################################
+# --listar
+########################################
+listar_maquinas() {
+    local d estado ip lista n principal resp desc f dep
+    local -a doms=() sueltos=()
+
+    while IFS= read -r d; do
+        if [[ -n "$d" ]]; then doms+=( "$d" ); fi
+    done < <(dominios_propios)
+
+    if (( ${#doms[@]} == 0 )); then
+        echo "No tienes máquinas (dominios que empiecen por ${PREFIJO_DOMINIO}-)."
+    else
+        echo "Máquinas ${PREFIJO_DOMINIO}-* (${#doms[@]}):"
+        for d in "${doms[@]}"; do
+            estado="$(estado_dominio "$d")"
+            ip="-"
+            if [[ "$estado" == "en ejecución" ]]; then
+                ip="$(ip_dominio "$d")"
+            fi
+            lista="$(discos_de_dominio "$d")"
+            if [[ -n "$lista" ]]; then
+                n="$(grep -c . <<< "$lista" || true)"
+                principal="${lista%%$'\n'*}"
+                desc="$(basename "$principal")"
+                resp="$(respaldo_de "$principal")"
+                if [[ -n "$resp" ]]; then desc+=" (copia de $resp)"; fi
+                if (( n > 1 )); then desc+=" + $(( n - 1 )) discos extra"; fi
+            else
+                desc="sin discos en el silo"
+            fi
+            printf '  %-26s %-13s %-16s %s\n' "$d" "$estado" "$ip" "$desc"
+        done
+    fi
+
+    while IFS= read -r f; do
+        if [[ -n "$f" ]]; then sueltos+=( "$f" ); fi
+    done < <(discos_sin_maquina)
+
+    if (( ${#sueltos[@]} > 0 )); then
+        echo
+        echo "Discos del silo sin máquina:"
+        for f in "${sueltos[@]}"; do
+            if [[ "$f" == "$BASE_IMG" ]]; then
+                desc="imagen cloud de Debian: de ella salen todas las máquinas (no la borres)"
+            else
+                desc=""
+                resp="$(respaldo_de "$f")"
+                if [[ -n "$resp" ]]; then desc="copia de $resp"; fi
+                dep="$(copias_de "$f")"
+                if [[ -n "$dep" ]]; then desc+="${desc:+; }imagen base de: $dep"; fi
+                if [[ -z "$desc" ]]; then desc="disco suelto"; fi
+            fi
+            printf '  %-26s %s\n' "$(basename "$f")" "$desc"
+        done
+    fi
+}
+
+########################################
+# --eliminar y --eliminar-todo
+########################################
+
+# Lo que se eliminaría y lo que se conserva (con el motivo)
+ELIM_DOMINIOS=()
+ELIM_FICHEROS=()
+ELIM_DIRS=()
+ELIM_CONSERVADOS=()
+ELIM_SIN_NADA=()
+
+# Rellena las listas anteriores para las máquinas indicadas por su nombre corto
+planificar_eliminacion() {   # NOMBRE...
+    local m vm f d otro habia
+    local -a ficheros=()
+    ELIM_DOMINIOS=(); ELIM_FICHEROS=(); ELIM_DIRS=(); ELIM_CONSERVADOS=(); ELIM_SIN_NADA=()
+
+    for m in "$@"; do
+        vm="${PREFIJO_DOMINIO}-${m}"
+        habia=false
+        if virsh dominfo "$vm" >/dev/null 2>&1; then
+            ELIM_DOMINIOS+=( "$vm" )
+            habia=true
+            while IFS= read -r f; do
+                if [[ -n "$f" ]] && ! en_lista "$f" ${ficheros[@]+"${ficheros[@]}"}; then
+                    ficheros+=( "$f" )
+                fi
+            done < <(discos_de_dominio "$vm")
+        fi
+        # También los discos que llevan su nombre aunque no estén conectados
+        # (una imagen base hecha con --glusterfs, restos de otra ejecución)
+        for f in "$SILO_DIR/${PREFIJO_FICHERO}${m}.qcow2" "$SILO_DIR/${PREFIJO_FICHERO}${m}"-vd?.qcow2; do
+            if [[ -f "$f" ]] && ! en_lista "$f" ${ficheros[@]+"${ficheros[@]}"}; then
+                ficheros+=( "$f" )
+                habia=true
+            fi
+        done
+        for d in "$SILO_DIR/cloudinit-${vm}" "$SILO_DIR/cloudinit-${vm}.dry-run"; do
+            if [[ -d "$d" ]]; then
+                ELIM_DIRS+=( "$d" )
+                habia=true
+            fi
+        done
+        if ! $habia; then
+            ELIM_SIN_NADA+=( "$m" )
+        fi
+    done
+
+    # Lo que use otra máquina, o de lo que dependan otras copias, se conserva
+    OBJ_DOMINIOS=( ${ELIM_DOMINIOS[@]+"${ELIM_DOMINIOS[@]}"} )
+    OBJ_FICHEROS=( ${ficheros[@]+"${ficheros[@]}"} )
+    cargar_dominios_vecinos
+    for f in ${ficheros[@]+"${ficheros[@]}"}; do
+        if otro="$(dominio_que_usa_disco "$f")"; then
+            ELIM_CONSERVADOS+=( "$(basename "$f"): lo usa la máquina '$otro'" )
+        elif otro="$(copia_que_depende "$f")"; then
+            ELIM_CONSERVADOS+=( "$(basename "$f"): es la imagen base de $(basename "$otro")" )
+        else
+            ELIM_FICHEROS+=( "$f" )
+        fi
+    done
+}
+
+hay_algo_que_eliminar() {
+    (( ${#ELIM_DOMINIOS[@]} + ${#ELIM_FICHEROS[@]} + ${#ELIM_DIRS[@]} > 0 ))
+}
+
+mostrar_plan_eliminacion() {
+    local d f x
+    if hay_algo_que_eliminar; then
+        echo "Se va a eliminar:"
+        for d in ${ELIM_DOMINIOS[@]+"${ELIM_DOMINIOS[@]}"}; do
+            echo "  máquina  $d ($(estado_dominio "$d"))"
+        done
+        for f in ${ELIM_FICHEROS[@]+"${ELIM_FICHEROS[@]}"}; do
+            echo "  disco    $f"
+        done
+        for x in ${ELIM_DIRS[@]+"${ELIM_DIRS[@]}"}; do
+            echo "  ficheros $x/"
+        done
+    fi
+    if (( ${#ELIM_CONSERVADOS[@]} > 0 )); then
+        echo "Se conserva:"
+        for x in "${ELIM_CONSERVADOS[@]}"; do
+            echo "  $x"
+        done
+    fi
+    for x in ${ELIM_SIN_NADA[@]+"${ELIM_SIN_NADA[@]}"}; do
+        echo "  (de '$x' no hay nada: ni la máquina ${PREFIJO_DOMINIO}-$x ni discos con ese nombre)"
+    done
+}
+
+ejecutar_eliminacion() {
+    local d f x
+    for d in ${ELIM_DOMINIOS[@]+"${ELIM_DOMINIOS[@]}"}; do
+        virsh destroy "$d" >/dev/null 2>&1 || true
+        if ! virsh undefine "$d" --snapshots-metadata >/dev/null 2>&1; then
+            error 22 "No se ha podido eliminar la máquina '$d'. Inténtalo a mano:
+  virsh destroy $d; virsh undefine $d --snapshots-metadata"
+        fi
+        echo "  ✔ máquina $d eliminada"
+    done
+    for f in ${ELIM_FICHEROS[@]+"${ELIM_FICHEROS[@]}"}; do
+        rm -f "$f"
+        echo "  ✔ disco $f eliminado"
+    done
+    for x in ${ELIM_DIRS[@]+"${ELIM_DIRS[@]}"}; do
+        rm -rf "$x"
+        echo "  ✔ ficheros $x eliminados"
+    done
+}
+
+cancelar_eliminacion() {
+    echo "Cancelado: no se ha eliminado nada."
+    SALIDA_CONTROLADA=true
+    exit 0
+}
+
+eliminar_maquinas() {   # NOMBRE...
+    local x msg
+    planificar_eliminacion "$@"
+
+    if ! hay_algo_que_eliminar; then
+        msg="No hay nada que eliminar."
+        for x in ${ELIM_SIN_NADA[@]+"${ELIM_SIN_NADA[@]}"}; do
+            msg+=$'\n'"  '$x': no existe la máquina ${PREFIJO_DOMINIO}-$x ni discos con ese nombre."
+        done
+        for x in ${ELIM_CONSERVADOS[@]+"${ELIM_CONSERVADOS[@]}"}; do
+            msg+=$'\n'"  $x (se conserva)."
+        done
+        msg+=$'\n'"Para ver lo que tienes: $0 --listar"
+        error 22 "$msg"
+    fi
+
+    mostrar_plan_eliminacion
+    if $DRY_RUN; then
+        echo "  (--dry-run: no se elimina nada)"
+        return 0
+    fi
+    if ! confirmar "¿Eliminar?"; then
+        cancelar_eliminacion
+    fi
+    ejecutar_eliminacion
+}
+
+eliminar_todo() {
+    local d f otro
+    local -a nombres=() candidatos=() sueltos=()
+
+    while IFS= read -r d; do
+        if [[ -n "$d" ]]; then nombres+=( "${d#"${PREFIJO_DOMINIO}-"}" ); fi
+    done < <(dominios_propios)
+
+    if (( ${#nombres[@]} > 0 )); then
+        planificar_eliminacion "${nombres[@]}"
+    else
+        ELIM_DOMINIOS=(); ELIM_FICHEROS=(); ELIM_DIRS=(); ELIM_CONSERVADOS=(); ELIM_SIN_NADA=()
+    fi
+
+    # Directorios cloud-init que quedaran de máquinas que ya no existen
+    for d in "$SILO_DIR"/cloudinit-"${PREFIJO_DOMINIO}"-*; do
+        if [[ -d "$d" ]] && ! en_lista "$d" ${ELIM_DIRS[@]+"${ELIM_DIRS[@]}"}; then
+            ELIM_DIRS+=( "$d" )
+        fi
+    done
+
+    # Discos del silo que quedarían sin máquina, salvo la imagen cloud. Aquí se
+    # comprueba contra TODOS los dominios del servidor: una máquina con otro
+    # prefijo (o de otro usuario) podría estar usando un fichero de este silo.
+    for f in "$SILO_DIR"/*.qcow2; do
+        if [[ ! -f "$f" || "$f" == "$BASE_IMG" ]]; then continue; fi
+        if en_lista "$f" ${ELIM_FICHEROS[@]+"${ELIM_FICHEROS[@]}"}; then continue; fi
+        if [[ -n "$PREFIJO_OPT" && "$(basename "$f")" != "${PREFIJO_OPT}-"* ]]; then continue; fi
+        candidatos+=( "$f" )
+    done
+    if (( ${#candidatos[@]} > 0 )); then
+        echo "Comprobando qué discos del silo usa alguna máquina…"
+        OBJ_DOMINIOS=( ${ELIM_DOMINIOS[@]+"${ELIM_DOMINIOS[@]}"} )
+        OBJ_FICHEROS=( ${ELIM_FICHEROS[@]+"${ELIM_FICHEROS[@]}"} "${candidatos[@]}" )
+        cargar_dominios_vecinos todos
+        for f in "${candidatos[@]}"; do
+            if otro="$(dominio_que_usa_disco "$f")"; then
+                ELIM_CONSERVADOS+=( "$(basename "$f"): lo usa la máquina '$otro'" )
+            elif otro="$(copia_que_depende "$f")"; then
+                ELIM_CONSERVADOS+=( "$(basename "$f"): es la imagen base de $(basename "$otro")" )
+            else
+                sueltos+=( "$f" )
+            fi
+        done
+    fi
+
+    if ! hay_algo_que_eliminar && (( ${#sueltos[@]} == 0 )); then
+        error 22 "No hay nada que eliminar: ni máquinas ${PREFIJO_DOMINIO}-* ni discos sin máquina en $SILO_DIR
+(aparte de $(basename "$BASE_IMG"), que se conserva siempre)."
+    fi
+
+    mostrar_plan_eliminacion
+    if (( ${#sueltos[@]} > 0 )); then
+        echo "Discos del silo sin máquina (se preguntará aparte):"
+        for f in "${sueltos[@]}"; do
+            echo "  disco    $f"
+        done
+    fi
+    if $DRY_RUN; then
+        echo "  (--dry-run: no se elimina nada)"
+        return 0
+    fi
+
+    if hay_algo_que_eliminar; then
+        if ! confirmar "¿Eliminar las máquinas con sus discos?"; then
+            cancelar_eliminacion
+        fi
+        ejecutar_eliminacion
+    fi
+    if (( ${#sueltos[@]} > 0 )); then
+        if confirmar "¿Eliminar también los ${#sueltos[@]} discos sin máquina?"; then
+            for f in "${sueltos[@]}"; do
+                rm -f "$f"
+                echo "  ✔ disco $f eliminado"
+            done
+        else
+            echo "Los discos sin máquina se conservan."
+        fi
+    fi
+}
+
 
 # Salidas de las herramientas en formato neutro, independiente del idioma
 # configurado en el servidor.
 export LC_ALL=C
+
+VERSION="2.2.0"
 
 ########################################
 # Configuración general
@@ -1508,6 +1903,10 @@ CLUSTER=false
 LIMPIAR=false
 DRY_RUN=false
 NO_WAIT=false
+LISTAR=false        # --listar
+ELIMINAR=false      # --eliminar MAQUINA...
+ELIMINAR_TODO=false # --eliminar-todo
+NOMBRES=()          # --eliminar: máquinas a eliminar
 
 RED_OPT=""
 DISCO_OPT=""
@@ -1641,9 +2040,14 @@ trap 'INTERRUMPIDO=true; exit 130' INT TERM HUP
 ########################################
 print_help() {
     cat <<EOF
+ci-provision.sh $VERSION
+
 Uso:
   $0 [opciones] MAQUINA [IP]
   $0 [opciones] --gluster-cluster
+  $0 --listar
+  $0 --eliminar MAQUINA [MAQUINA...]
+  $0 --eliminar-todo
 
 Crea una máquina virtual Debian 12 con cloud-init en tu silo ($SILO_DIR).
 De MAQUINA salen el nombre del dominio (${USUARIO}-MAQUINA), el nombre de
@@ -1692,6 +2096,17 @@ Opciones:
                        (en el clúster solo afecta a los nodos: la base se espera siempre)
   -h, --help           Muestra esta ayuda
 
+Ver y eliminar lo que ya tienes:
+  --listar             Muestra tus máquinas (estado, IP, discos) y los discos del silo
+                       que no usa ninguna. No lleva MAQUINA.
+  --eliminar MAQUINA...
+                       Elimina esas máquinas con sus discos y sus ficheros cloud-init,
+                       previa confirmación. Nunca borra un disco que use otra máquina
+                       ni una imagen de la que dependan otras copias.
+  --eliminar-todo      Elimina todas tus máquinas (las ${USUARIO}-*) con sus discos y
+                       ofrece borrar los discos del silo que queden sin máquina.
+  --version            Muestra la versión del script
+
 En todas las máquinas:
   - Usuario 'administrador' con tu clave pública ($PUBKEY_PATH) y
     sudo sin contraseña. Sin contraseña propia salvo que uses --ssh-pass.
@@ -1726,6 +2141,13 @@ parse_args() {
             --no-wait)         NO_WAIT=true;     shift ;;
             --no-root)         NO_ROOT=true;     shift ;;
             --no-virt-viewer)  NO_GRAFICOS=true; shift ;;
+            --listar)          LISTAR=true;        shift ;;
+            --eliminar)        ELIMINAR=true;      shift ;;
+            --eliminar-todo)   ELIMINAR_TODO=true; shift ;;
+            --version)
+                echo "ci-provision.sh $VERSION"
+                exit 0
+                ;;
             --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass|--prefijo)
                 if [[ $# -lt 2 || "$2" == --* ]]; then
                     error 11 "Falta el valor de la opción $1. Escríbelo a continuación, separado por un espacio: $1 VALOR"
@@ -1781,6 +2203,41 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
     ########################################
     # Parámetros posicionales
     ########################################
+    ########################################
+    # Modos de gestión: --listar, --eliminar, --eliminar-todo
+    ########################################
+    local modos=0 m
+    for m in $CLUSTER $LISTAR $ELIMINAR $ELIMINAR_TODO; do
+        if [[ "$m" == true ]]; then modos=$(( modos + 1 )); fi
+    done
+    if (( modos > 1 )); then
+        error 10 "--gluster-cluster, --listar, --eliminar y --eliminar-todo son modos distintos: usa solo uno."
+    fi
+    if $LISTAR || $ELIMINAR || $ELIMINAR_TODO; then
+        if $EXTRA_DISKS || $GLUSTERFS || $LIMPIAR || $NO_WAIT || $NO_ROOT || $NO_GRAFICOS || \
+           [[ -n "$RED_OPT$DISCO_OPT$BASE_OPT$RAM_OPT$VCPUS_OPT$SSH_PASS" ]] || [[ "$TAM_DISCO" != "$TAM_DISCO_DEFECTO" ]]; then
+            error 10 "Con --listar, --eliminar y --eliminar-todo solo se admiten --prefijo y --dry-run."
+        fi
+        if $ELIMINAR; then
+            if (( ${#args[@]} == 0 )); then
+                error 10 "Falta el nombre de la máquina a eliminar: $0 --eliminar MAQUINA [MAQUINA...]
+(p.ej. $0 --eliminar server1). Para ver las que tienes: $0 --listar"
+            fi
+            NOMBRES=( "${args[@]}" )
+            local pref="${PREFIJO_OPT:-$USUARIO}"
+            for m in "${NOMBRES[@]}"; do
+                if ! [[ "$m" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+                    error 20 "El nombre de máquina '$m' no es válido. Solo letras, números y guiones (p.ej. server1)."
+                fi
+                if [[ "${m,,}" == "${pref,,}-"* ]]; then
+                    error 20 "Indica solo el nombre corto de la máquina, sin '$pref-' delante: '${m#"${m%%-*}-"}' en vez de '$m'."
+                fi
+            done
+        elif (( ${#args[@]} > 0 )); then
+            error 10 "--listar y --eliminar-todo no llevan MAQUINA (sobra: '${args[*]}')."
+        fi
+    fi
+
     if $GLUSTERFS && $NO_WAIT; then
         error 10 "--no-wait no se puede combinar con --glusterfs: la base hay que apagarla
 cuando cloud-init termine, así que es imprescindible esperar."
@@ -1797,6 +2254,8 @@ cuando cloud-init termine, así que es imprescindible esperar."
             error 10 "--gluster-cluster ya construye la imagen base y los ${#UNIDADES_CLUSTER[@]} discos de cada nodo:
 no se combina con --glusterfs ni con --extra-disks."
         fi
+    elif $LISTAR || $ELIMINAR || $ELIMINAR_TODO; then
+        :
     else
         if (( ${#args[@]} == 0 )); then
             error 10 "Falta el nombre de la máquina.
@@ -2065,6 +2524,8 @@ print_summary() {
     if ! $NO_GRAFICOS; then
         echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system $VM_NAME"
     fi
+    echo
+    echo "Para eliminarla con sus discos:  $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--eliminar $MAQUINA"
     echo "-------------------------------------------"
 }
 
@@ -2085,6 +2546,9 @@ print_summary_base() {
     echo "  qemu-img create -f qcow2 -b $(basename "$DISCO_MAIN") -F qcow2 server1.qcow2 40G"
     echo
     echo "IMPORTANTE: no borres ni modifiques $(basename "$DISCO_MAIN") mientras existan copias de él."
+    if [[ -z "$DISCO_OPT" ]]; then
+        echo "Cuando ya no lo necesites:  $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--eliminar $MAQUINA"
+    fi
     echo "-------------------------------------------"
 }
 
@@ -2207,7 +2671,13 @@ main() {
     parse_args "$@"
     validar_entorno
 
-    if $CLUSTER; then
+    if $LISTAR; then
+        listar_maquinas
+    elif $ELIMINAR; then
+        eliminar_maquinas "${NOMBRES[@]}"
+    elif $ELIMINAR_TODO; then
+        eliminar_todo
+    elif $CLUSTER; then
         ejecutar_cluster
     else
         ejecutar_maquina

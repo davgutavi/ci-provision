@@ -32,6 +32,8 @@ Todas las máquinas que crea tienen:
 - `--no-virt-viewer`: no habilita la consola gráfica.
 - `--limpiar`: elimina, antes de empezar, las máquinas y discos que el script vaya a crear
   si ya existen de una ejecución anterior.
+- `--listar`, `--eliminar` y `--eliminar-todo`: ver y eliminar lo que ya tienes, con sus
+  discos, sin tocar nunca un disco que use otra máquina.
 
 ---
 
@@ -139,6 +141,9 @@ Ejecuta siempre desde tu silo:
 ```bash
 ./ci-provision.sh [opciones] MAQUINA [IP]
 ./ci-provision.sh [opciones] --gluster-cluster
+./ci-provision.sh --listar
+./ci-provision.sh --eliminar MAQUINA [MAQUINA...]
+./ci-provision.sh --eliminar-todo
 ```
 
 De `MAQUINA` (por ejemplo `server1`) salen el nombre del dominio en libvirt
@@ -164,7 +169,11 @@ De `MAQUINA` (por ejemplo `server1`) salen el nombre del dominio en libvirt
 | `--no-root` | No habilita al usuario `root` |
 | `--no-virt-viewer` | No habilita la consola gráfica. La consola de texto (`virsh console`) sigue funcionando |
 | `--limpiar` | Si ya existen los dominios o discos que el script va a crear, los elimina antes, previa confirmación. **Solo esos** |
+| `--listar` | Muestra tus máquinas (estado, IP, discos) y los discos del silo que no usa ninguna |
+| `--eliminar MAQUINA...` | Elimina esas máquinas con sus discos y sus ficheros cloud-init, previa confirmación |
+| `--eliminar-todo` | Elimina todas tus máquinas con sus discos y ofrece borrar los discos que queden sin máquina |
 | `-h` | Ayuda |
+| `--version` | Versión del script |
 
 Hay más opciones para casos particulares en [opciones avanzadas](#opciones-avanzadas).
 
@@ -184,6 +193,40 @@ otro fichero de tu silo. Antes de hacerlo te enseña la lista y te pide
 confirmación por teclado. Y si uno de esos discos lo está usando otra de tus
 máquinas, o es la imagen base de otras copias, no lo borra: se detiene y te lo
 explica.
+
+### 🗂️ Ver y eliminar lo que ya tienes
+
+```bash
+./ci-provision.sh --listar
+```
+
+Muestra tus máquinas (las que empiezan por `TU_USUARIO-`), con su estado, su IP y
+sus discos, y después los discos del silo que no usa ninguna máquina (por ejemplo
+`glusterbase.qcow2`, que es la imagen de la que son copia los nodos).
+
+```bash
+./ci-provision.sh --eliminar server1
+```
+
+Elimina `TU_USUARIO-server1` con **todos** sus discos (los que tenga conectados,
+según libvirt) y sus ficheros cloud-init, tras enseñarte la lista y pedir
+confirmación. Puedes indicar varias máquinas a la vez; para deshacer la
+infraestructura GlusterFS entera:
+
+```bash
+./ci-provision.sh --eliminar server1 server2 server3 server4 glusterbase
+```
+
+Nunca borra un disco que esté usando otra máquina, ni una imagen de la que dependan
+otras copias: en ese caso lo conserva y te dice por qué.
+
+```bash
+./ci-provision.sh --eliminar-todo
+```
+
+Elimina todas tus máquinas con sus discos y, en una segunda pregunta, los discos del
+silo que queden sin máquina. `debian12.qcow2` no se toca nunca. Con `--dry-run`, las
+tres opciones solo enseñan lo que harían.
 
 ---
 
@@ -387,6 +430,7 @@ esos directorios los puedes borrar cuando quieras.
 | **16** | Nombre de disco o de imagen no válido | Solo el nombre del fichero, sin rutas |
 | **20** | Nombre de máquina o prefijo (`--prefijo`) no válido | Solo letras, números y guiones; sin tu usuario delante |
 | **21** | Ya existe el dominio o algún disco, o un disco lo usa otra máquina | El mensaje indica cómo eliminarlos, o usa `--limpiar` |
+| **22** | No hay nada que eliminar, o no se ha podido eliminar | Comprueba el nombre con `--listar` |
 | **30** | No existe el silo | Crear `$HOME/imagenesMV` y mapearlo en el hipervisor |
 | **31** | No existe la clave pública, o el fichero no contiene una sola clave | `ssh-keygen` |
 | **37** | No se ha podido descargar la imagen base, o la que hay está corrupta | El mensaje indica el `wget` manual, o el `rm` para que el script la vuelva a descargar |

@@ -10,35 +10,58 @@
 OBJ_DOMINIOS=()
 OBJ_FICHEROS=()
 
-# Dominios del usuario (o del prefijo) que NO son objetivo de esta ejecución:
-# son los que pueden tener discos en este silo
+# ¿Está VALOR entre los demás argumentos?
+en_lista() {   # VALOR [ELEMENTO...]
+    local x="$1" e
+    shift
+    for e in "$@"; do
+        if [[ "$e" == "$x" ]]; then return 0; fi
+    done
+    return 1
+}
+
+# Pregunta sí/no por teclado. Sin terminal (uso desde otro script) la opción
+# ya es una petición explícita y se sigue adelante.
+confirmar() {   # PREGUNTA
+    if [[ ! -t 0 ]]; then return 0; fi
+    local respuesta
+    read -r -p "$1 [s/N] " respuesta || { respuesta=""; echo; }
+    case "$respuesta" in
+        s|S|si|sí|Si|Sí|SI|SÍ) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Dominios "vecinos": los que NO son objetivo de esta ejecución y podrían
+# estar usando ficheros de este silo. Por defecto, los del usuario (o del
+# prefijo); con 'todos', todos los del servidor. De cada uno se anotan sus
+# discos, para saber quién usa cada fichero.
 DOMINIOS_VECINOS=()
-cargar_dominios_vecinos() {
-    local lista d x pref1="${USUARIO,,}" pref2="${PREFIJO_DOMINIO,,}"
+declare -A DISCO_USADO_POR=()   # fichero → dominio vecino que lo usa
+cargar_dominios_vecinos() {   # [todos]
+    local lista d f salida todos="${1:-}" pref1="${USUARIO,,}" pref2="${PREFIJO_DOMINIO,,}"
     DOMINIOS_VECINOS=()
+    DISCO_USADO_POR=()
     lista="$(virsh list --all --name 2>/dev/null || true)"
     while IFS= read -r d; do
-        [[ -z "$d" ]] && continue
-        [[ "${d,,}" == "$pref1"* || "${d,,}" == "$pref2"* ]] || continue
-        for x in ${OBJ_DOMINIOS[@]+"${OBJ_DOMINIOS[@]}"}; do
-            [[ "$x" == "$d" ]] && continue 2
-        done
+        if [[ -z "$d" ]]; then continue; fi
+        if [[ -z "$todos" && "${d,,}" != "$pref1"* && "${d,,}" != "$pref2"* ]]; then continue; fi
+        if en_lista "$d" ${OBJ_DOMINIOS[@]+"${OBJ_DOMINIOS[@]}"}; then continue; fi
         DOMINIOS_VECINOS+=( "$d" )
+        salida="$(virsh domblklist "$d" --inactive 2>/dev/null || true)"
+        while IFS= read -r f; do
+            if [[ -n "$f" && -z "${DISCO_USADO_POR[$f]:-}" ]]; then
+                DISCO_USADO_POR[$f]="$d"
+            fi
+        done < <(awk 'NR > 2 && $2 ~ /^\// { print $2 }' <<< "$salida")
     done <<< "$lista"
 }
 
-# ¿Usa este fichero como disco alguna máquina que no se va a eliminar?
-# Devuelve su nombre por stdout.
+# ¿Usa este fichero como disco alguna máquina vecina? Devuelve su nombre.
 dominio_que_usa_disco() {   # FICHERO
-    local f="$1" d salida
-    for d in ${DOMINIOS_VECINOS[@]+"${DOMINIOS_VECINOS[@]}"}; do
-        salida="$(virsh domblklist "$d" --inactive 2>/dev/null || true)"
-        if awk -v f="$f" '$2 == f { ok = 1 } END { exit !ok }' <<< "$salida"; then
-            echo "$d"
-            return 0
-        fi
-    done
-    return 1
+    local d="${DISCO_USADO_POR[$1]:-}"
+    if [[ -z "$d" ]]; then return 1; fi
+    echo "$d"
 }
 
 # ¿Es este fichero el respaldo (imagen base) de otro qcow2 del silo que se
@@ -126,17 +149,10 @@ Elige otro nombre de máquina (o de disco, con --disco), o elimina antes esa cop
 
     # Confirmación por teclado. Si no hay terminal (uso desde otro script),
     # --limpiar ya es una petición explícita y se sigue adelante.
-    if [[ -t 0 ]]; then
-        local respuesta
-        read -r -p "¿Eliminar estos elementos? [s/N] " respuesta || { respuesta=""; echo; }
-        case "$respuesta" in
-            s|S|si|sí|Si|Sí|SI|SÍ) ;;
-            *)
-                echo "Cancelado: no se ha eliminado nada."
-                SALIDA_CONTROLADA=true
-                exit 0
-                ;;
-        esac
+    if ! confirmar "¿Eliminar estos elementos?"; then
+        echo "Cancelado: no se ha eliminado nada."
+        SALIDA_CONTROLADA=true
+        exit 0
     fi
 
     for d in ${dominios[@]+"${dominios[@]}"}; do

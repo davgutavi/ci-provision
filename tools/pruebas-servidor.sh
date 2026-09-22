@@ -292,6 +292,27 @@ fase_b() {
     comprueba "el disco base se conserva, COW de debian12.qcow2" bash -c "[ \"\$(qemu-img info -U --output=json '$SILO/pruebasgluster.qcow2' | jq -r '.\"backing-filename\"')\" = debian12.qcow2 ]"
     info "el contenido de la base (glusterd, xfsprogs, machine-id) se comprueba en la fase C, dentro de los nodos"
 
+    # ---------- B5: --listar y --eliminar ----------
+    titulo "B5: --listar, --dry-run --eliminar-todo y --eliminar"
+    salida="$(ejecutar_script --listar 2>&1)"; rc=$?
+    echo "$salida" >> "$LOG"
+    [[ $rc == 0 ]] && ok "--listar termina con código 0" || ko "--listar: código $rc"
+    grep -q "${USUARIO}-pruebas1 .*en ejecución" <<< "$salida" && ok "--listar muestra pruebas1 en ejecución" || ko "--listar no muestra pruebas1"
+    grep -q "pruebasgluster.qcow2 .*copia de debian12.qcow2" <<< "$salida" && ok "--listar muestra pruebasgluster.qcow2 como disco sin máquina" || ko "--listar no muestra pruebasgluster.qcow2"
+    echo "$salida" | sed 's/^/    | /'
+    salida="$(ejecutar_script --dry-run --eliminar-todo 2>&1)"; rc=$?
+    echo "$salida" >> "$LOG"
+    [[ $rc == 0 ]] && ok "--dry-run --eliminar-todo termina con código 0" || ko "--dry-run --eliminar-todo: código $rc"
+    comprueba "y no ha eliminado pruebas1" virsh dominfo "${USUARIO}-pruebas1"
+    if [[ -z "${CONSERVAR:-}" ]]; then
+        salida="$(ejecutar_script --eliminar pruebas1 pruebasgluster 2>&1)"; rc=$?
+        echo "$salida" >> "$LOG"
+        [[ $rc == 0 ]] && ok "--eliminar pruebas1 pruebasgluster termina con código 0" || ko "--eliminar: código $rc"
+        comprueba "pruebas1 eliminada" bash -c "! virsh dominfo ${USUARIO}-pruebas1 >/dev/null 2>&1"
+        comprueba "sus discos y pruebasgluster.qcow2 eliminados" bash -c "! ls $SILO/pruebas1*.qcow2 $SILO/pruebasgluster.qcow2 >/dev/null 2>&1"
+        comprueba "sus ficheros cloud-init eliminados" bash -c "[ ! -d $SILO/cloudinit-${USUARIO}-pruebas1 ]"
+    fi
+
     if [[ -z "${CONSERVAR:-}" ]]; then
         elimina_maquina pruebas1
         elimina_maquina pruebasgluster

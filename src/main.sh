@@ -5,6 +5,8 @@ set -euo pipefail
 # configurado en el servidor.
 export LC_ALL=C
 
+VERSION="2.2.0"
+
 ########################################
 # Configuración general
 ########################################
@@ -58,6 +60,10 @@ CLUSTER=false
 LIMPIAR=false
 DRY_RUN=false
 NO_WAIT=false
+LISTAR=false        # --listar
+ELIMINAR=false      # --eliminar MAQUINA...
+ELIMINAR_TODO=false # --eliminar-todo
+NOMBRES=()          # --eliminar: máquinas a eliminar
 
 RED_OPT=""
 DISCO_OPT=""
@@ -197,9 +203,14 @@ trap 'INTERRUMPIDO=true; exit 130' INT TERM HUP
 ########################################
 print_help() {
     cat <<EOF
+ci-provision.sh $VERSION
+
 Uso:
   $0 [opciones] MAQUINA [IP]
   $0 [opciones] --gluster-cluster
+  $0 --listar
+  $0 --eliminar MAQUINA [MAQUINA...]
+  $0 --eliminar-todo
 
 Crea una máquina virtual Debian 12 con cloud-init en tu silo ($SILO_DIR).
 De MAQUINA salen el nombre del dominio (${USUARIO}-MAQUINA), el nombre de
@@ -248,6 +259,17 @@ Opciones:
                        (en el clúster solo afecta a los nodos: la base se espera siempre)
   -h, --help           Muestra esta ayuda
 
+Ver y eliminar lo que ya tienes:
+  --listar             Muestra tus máquinas (estado, IP, discos) y los discos del silo
+                       que no usa ninguna. No lleva MAQUINA.
+  --eliminar MAQUINA...
+                       Elimina esas máquinas con sus discos y sus ficheros cloud-init,
+                       previa confirmación. Nunca borra un disco que use otra máquina
+                       ni una imagen de la que dependan otras copias.
+  --eliminar-todo      Elimina todas tus máquinas (las ${USUARIO}-*) con sus discos y
+                       ofrece borrar los discos del silo que queden sin máquina.
+  --version            Muestra la versión del script
+
 En todas las máquinas:
   - Usuario 'administrador' con tu clave pública ($PUBKEY_PATH) y
     sudo sin contraseña. Sin contraseña propia salvo que uses --ssh-pass.
@@ -282,6 +304,13 @@ parse_args() {
             --no-wait)         NO_WAIT=true;     shift ;;
             --no-root)         NO_ROOT=true;     shift ;;
             --no-virt-viewer)  NO_GRAFICOS=true; shift ;;
+            --listar)          LISTAR=true;        shift ;;
+            --eliminar)        ELIMINAR=true;      shift ;;
+            --eliminar-todo)   ELIMINAR_TODO=true; shift ;;
+            --version)
+                echo "ci-provision.sh $VERSION"
+                exit 0
+                ;;
             --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass|--prefijo)
                 if [[ $# -lt 2 || "$2" == --* ]]; then
                     error 11 "Falta el valor de la opción $1. Escríbelo a continuación, separado por un espacio: $1 VALOR"
@@ -337,6 +366,41 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
     ########################################
     # Parámetros posicionales
     ########################################
+    ########################################
+    # Modos de gestión: --listar, --eliminar, --eliminar-todo
+    ########################################
+    local modos=0 m
+    for m in $CLUSTER $LISTAR $ELIMINAR $ELIMINAR_TODO; do
+        if [[ "$m" == true ]]; then modos=$(( modos + 1 )); fi
+    done
+    if (( modos > 1 )); then
+        error 10 "--gluster-cluster, --listar, --eliminar y --eliminar-todo son modos distintos: usa solo uno."
+    fi
+    if $LISTAR || $ELIMINAR || $ELIMINAR_TODO; then
+        if $EXTRA_DISKS || $GLUSTERFS || $LIMPIAR || $NO_WAIT || $NO_ROOT || $NO_GRAFICOS || \
+           [[ -n "$RED_OPT$DISCO_OPT$BASE_OPT$RAM_OPT$VCPUS_OPT$SSH_PASS" ]] || [[ "$TAM_DISCO" != "$TAM_DISCO_DEFECTO" ]]; then
+            error 10 "Con --listar, --eliminar y --eliminar-todo solo se admiten --prefijo y --dry-run."
+        fi
+        if $ELIMINAR; then
+            if (( ${#args[@]} == 0 )); then
+                error 10 "Falta el nombre de la máquina a eliminar: $0 --eliminar MAQUINA [MAQUINA...]
+(p.ej. $0 --eliminar server1). Para ver las que tienes: $0 --listar"
+            fi
+            NOMBRES=( "${args[@]}" )
+            local pref="${PREFIJO_OPT:-$USUARIO}"
+            for m in "${NOMBRES[@]}"; do
+                if ! [[ "$m" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+                    error 20 "El nombre de máquina '$m' no es válido. Solo letras, números y guiones (p.ej. server1)."
+                fi
+                if [[ "${m,,}" == "${pref,,}-"* ]]; then
+                    error 20 "Indica solo el nombre corto de la máquina, sin '$pref-' delante: '${m#"${m%%-*}-"}' en vez de '$m'."
+                fi
+            done
+        elif (( ${#args[@]} > 0 )); then
+            error 10 "--listar y --eliminar-todo no llevan MAQUINA (sobra: '${args[*]}')."
+        fi
+    fi
+
     if $GLUSTERFS && $NO_WAIT; then
         error 10 "--no-wait no se puede combinar con --glusterfs: la base hay que apagarla
 cuando cloud-init termine, así que es imprescindible esperar."
@@ -353,6 +417,8 @@ cuando cloud-init termine, así que es imprescindible esperar."
             error 10 "--gluster-cluster ya construye la imagen base y los ${#UNIDADES_CLUSTER[@]} discos de cada nodo:
 no se combina con --glusterfs ni con --extra-disks."
         fi
+    elif $LISTAR || $ELIMINAR || $ELIMINAR_TODO; then
+        :
     else
         if (( ${#args[@]} == 0 )); then
             error 10 "Falta el nombre de la máquina.
@@ -621,6 +687,8 @@ print_summary() {
     if ! $NO_GRAFICOS; then
         echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system $VM_NAME"
     fi
+    echo
+    echo "Para eliminarla con sus discos:  $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--eliminar $MAQUINA"
     echo "-------------------------------------------"
 }
 
@@ -641,6 +709,9 @@ print_summary_base() {
     echo "  qemu-img create -f qcow2 -b $(basename "$DISCO_MAIN") -F qcow2 server1.qcow2 40G"
     echo
     echo "IMPORTANTE: no borres ni modifiques $(basename "$DISCO_MAIN") mientras existan copias de él."
+    if [[ -z "$DISCO_OPT" ]]; then
+        echo "Cuando ya no lo necesites:  $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--eliminar $MAQUINA"
+    fi
     echo "-------------------------------------------"
 }
 
@@ -763,7 +834,13 @@ main() {
     parse_args "$@"
     validar_entorno
 
-    if $CLUSTER; then
+    if $LISTAR; then
+        listar_maquinas
+    elif $ELIMINAR; then
+        eliminar_maquinas "${NOMBRES[@]}"
+    elif $ELIMINAR_TODO; then
+        eliminar_todo
+    elif $CLUSTER; then
         ejecutar_cluster
     else
         ejecutar_maquina
