@@ -18,22 +18,12 @@
 
 # Quita un dominio del registro de creados (cuando se elimina a propósito)
 quitar_dominio_creado() {
-    local quitar="$1" d
-    local -a nuevos=()
-    for d in ${DOMINIOS_CREADOS[@]+"${DOMINIOS_CREADOS[@]}"}; do
-        if [[ "$d" != "$quitar" ]]; then
-            nuevos+=( "$d" )
-        fi
-    done
-    DOMINIOS_CREADOS=( ${nuevos[@]+"${nuevos[@]}"} )
+    quitar_de_lista DOMINIOS_CREADOS "$1"
 }
 
 # Discos extra de un nodo
 discos_extra_nodo() {
-    local host="$1" u
-    for u in "${UNIDADES_CLUSTER[@]}"; do
-        echo "${SILO_DIR}/${PREFIJO_FICHERO}${host}-${u}.qcow2"
-    done
+    discos_extra "$1" "${UNIDADES_CLUSTER[@]}"
 }
 
 # Disco de la imagen base del clúster: la que se construye en la fase 1 o,
@@ -74,14 +64,7 @@ objetivos_cluster() {
 crear_base_gluster() {
     local vm="$1" host="$2" disco="$3"
 
-    generar_cloudinit "$vm" "$host" "" gluster
-    construir_comando "$vm" "$RAM_MB" "$VCPUS" "$disco"
-
-    echo "→ Creando el disco $(basename "$disco") (copia COW de $(basename "$BASE_IMG"), $TAM_DISCO)…"
-    crear_disco_cow "$disco" "$BASE_IMG" "$TAM_DISCO"
-
-    echo "→ Creando la máquina '$vm' con cloud-init…"
-    crear_dominio "$vm"
+    crear_maquina "$vm" "$host" "" gluster "$disco" "$BASE_IMG"
 
     # Para una base no vale "se da por terminada": si no se puede consultar
     # cloud-init, se sigue esperando hasta agotar el tiempo
@@ -253,18 +236,8 @@ ejecutar_cluster() {
         extras=()
         while IFS= read -r d; do extras+=( "$d" ); done < <(discos_extra_nodo "$host")
 
-        generar_cloudinit "$vm" "$host" "$ip" nodo
-        construir_comando "$vm" "$RAM_MB" "$VCPUS" "$disco" "${extras[@]}"
-
-        echo "→ $vm ($ip): creando $(basename "$disco") y ${#extras[@]} discos extra…"
-        crear_disco_cow "$disco" "$base_disco" "$TAM_DISCO"
-        for d in "${extras[@]}"; do
-            crear_disco_vacio "$d" "$TAM_DISCO_EXTRA"
-        done
-
-        echo "→ $vm: creando la máquina…"
-        crear_dominio "$vm"
-        IP_ESPERADA[$vm]="$ip"
+        echo "── $vm ($ip)"
+        crear_maquina "$vm" "$host" "$ip" nodo "$disco" "$base_disco" "${extras[@]}"
         nodos_vm+=( "$vm" )
     done
     CREACION_COMPLETA=true

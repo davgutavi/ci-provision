@@ -1006,14 +1006,30 @@ crear_disco_vacio() {
 
 # Quita un fichero del registro de creados (cuando pasa a ser definitivo)
 quitar_disco_creado() {
-    local quitar="$1" d
+    quitar_de_lista DISCOS_CREADOS "$1"
+}
+
+# Quita VALOR del array cuyo nombre se indica (por referencia)
+quitar_de_lista() {   # NOMBRE_ARRAY VALOR
+    local -n lista_ref="$1"
+    local quitar="$2" x
     local -a nuevos=()
-    for d in ${DISCOS_CREADOS[@]+"${DISCOS_CREADOS[@]}"}; do
-        if [[ "$d" != "$quitar" ]]; then
-            nuevos+=( "$d" )
+    for x in ${lista_ref[@]+"${lista_ref[@]}"}; do
+        if [[ "$x" != "$quitar" ]]; then
+            nuevos+=( "$x" )
         fi
     done
-    DISCOS_CREADOS=( ${nuevos[@]+"${nuevos[@]}"} )
+    lista_ref=( ${nuevos[@]+"${nuevos[@]}"} )
+}
+
+# Rutas de los discos extra de una máquina, una por línea
+#   discos_extra MAQUINA UNIDAD...
+discos_extra() {
+    local host="$1" u
+    shift
+    for u in "$@"; do
+        echo "${SILO_DIR}/${PREFIJO_FICHERO}${host}-${u}.qcow2"
+    done
 }
 
 ########################################
@@ -1247,22 +1263,12 @@ apagar_maquina() {
 
 # Quita un dominio del registro de creados (cuando se elimina a propósito)
 quitar_dominio_creado() {
-    local quitar="$1" d
-    local -a nuevos=()
-    for d in ${DOMINIOS_CREADOS[@]+"${DOMINIOS_CREADOS[@]}"}; do
-        if [[ "$d" != "$quitar" ]]; then
-            nuevos+=( "$d" )
-        fi
-    done
-    DOMINIOS_CREADOS=( ${nuevos[@]+"${nuevos[@]}"} )
+    quitar_de_lista DOMINIOS_CREADOS "$1"
 }
 
 # Discos extra de un nodo
 discos_extra_nodo() {
-    local host="$1" u
-    for u in "${UNIDADES_CLUSTER[@]}"; do
-        echo "${SILO_DIR}/${PREFIJO_FICHERO}${host}-${u}.qcow2"
-    done
+    discos_extra "$1" "${UNIDADES_CLUSTER[@]}"
 }
 
 # Disco de la imagen base del clúster: la que se construye en la fase 1 o,
@@ -1303,14 +1309,7 @@ objetivos_cluster() {
 crear_base_gluster() {
     local vm="$1" host="$2" disco="$3"
 
-    generar_cloudinit "$vm" "$host" "" gluster
-    construir_comando "$vm" "$RAM_MB" "$VCPUS" "$disco"
-
-    echo "→ Creando el disco $(basename "$disco") (copia COW de $(basename "$BASE_IMG"), $TAM_DISCO)…"
-    crear_disco_cow "$disco" "$BASE_IMG" "$TAM_DISCO"
-
-    echo "→ Creando la máquina '$vm' con cloud-init…"
-    crear_dominio "$vm"
+    crear_maquina "$vm" "$host" "" gluster "$disco" "$BASE_IMG"
 
     # Para una base no vale "se da por terminada": si no se puede consultar
     # cloud-init, se sigue esperando hasta agotar el tiempo
@@ -1482,18 +1481,8 @@ ejecutar_cluster() {
         extras=()
         while IFS= read -r d; do extras+=( "$d" ); done < <(discos_extra_nodo "$host")
 
-        generar_cloudinit "$vm" "$host" "$ip" nodo
-        construir_comando "$vm" "$RAM_MB" "$VCPUS" "$disco" "${extras[@]}"
-
-        echo "→ $vm ($ip): creando $(basename "$disco") y ${#extras[@]} discos extra…"
-        crear_disco_cow "$disco" "$base_disco" "$TAM_DISCO"
-        for d in "${extras[@]}"; do
-            crear_disco_vacio "$d" "$TAM_DISCO_EXTRA"
-        done
-
-        echo "→ $vm: creando la máquina…"
-        crear_dominio "$vm"
-        IP_ESPERADA[$vm]="$ip"
+        echo "── $vm ($ip)"
+        crear_maquina "$vm" "$host" "$ip" nodo "$disco" "$base_disco" "${extras[@]}"
         nodos_vm+=( "$vm" )
     done
     CREACION_COMPLETA=true
@@ -2527,8 +2516,9 @@ EOF
 ########################################
 # Parseo de opciones
 ########################################
+ARGS=()   # parámetros posicionales, los rellena parse_args
 parse_args() {
-    local args=()
+    ARGS=()
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2584,7 +2574,7 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
                 ;;
             --)
                 shift
-                args+=("$@")
+                ARGS+=("$@")
                 break
                 ;;
             --*=*)
@@ -2594,7 +2584,7 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
                 error 12 "Opción desconocida '$1'. Consulta la ayuda con -h."
                 ;;
             *)
-                args+=("$1")
+                ARGS+=("$1")
                 shift
                 ;;
         esac
@@ -2616,6 +2606,10 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
         fi
     fi
 
+}
+
+# Comprobaciones de las opciones ya leídas: modos, parámetros y valores
+validar_opciones() {
     ########################################
     # Modos de gestión: --listar, --eliminar, --eliminar-todo
     ########################################
@@ -2632,11 +2626,11 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
             error 10 "Con --listar, --eliminar, --eliminar-todo y --menu solo se admiten --prefijo y --dry-run."
         fi
         if $ELIMINAR; then
-            if (( ${#args[@]} == 0 )); then
+            if (( ${#ARGS[@]} == 0 )); then
                 error 10 "Falta el nombre de la máquina a eliminar: $0 --eliminar MAQUINA [MAQUINA...]
 (p.ej. $0 --eliminar server1). Para ver las que tienes: $0 --listar"
             fi
-            NOMBRES=( "${args[@]}" )
+            NOMBRES=( "${ARGS[@]}" )
             local pref="${PREFIJO_OPT:-$USUARIO}"
             for m in "${NOMBRES[@]}"; do
                 if ! [[ "$m" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
@@ -2646,8 +2640,8 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
                     error 20 "Indica solo el nombre corto de la máquina, sin '$pref-' delante: '${m#"${m%%-*}-"}' en vez de '$m'."
                 fi
             done
-        elif (( ${#args[@]} > 0 )); then
-            error 10 "--listar, --eliminar-todo y --menu no llevan MAQUINA (sobra: '${args[*]}')."
+        elif (( ${#ARGS[@]} > 0 )); then
+            error 10 "--listar, --eliminar-todo y --menu no llevan MAQUINA (sobra: '${ARGS[*]}')."
         fi
     fi
 
@@ -2657,7 +2651,7 @@ cuando cloud-init termine, así que es imprescindible esperar."
     fi
 
     if $CLUSTER; then
-        if (( ${#args[@]} > 0 )); then
+        if (( ${#ARGS[@]} > 0 )); then
             error 10 "Con --gluster-cluster no se indica MAQUINA ni IP: los nombres (${CLUSTER_BASE}, ${CLUSTER_NODOS[*]}) y las IPs (.${CLUSTER_IP_INICIAL} en adelante) son fijos."
         fi
         if [[ -n "$DISCO_OPT" ]]; then
@@ -2670,21 +2664,21 @@ no se combina con --glusterfs ni con --extra-disks."
     elif $LISTAR || $ELIMINAR || $ELIMINAR_TODO || $MENU; then
         :
     else
-        if (( ${#args[@]} == 0 )); then
+        if (( ${#ARGS[@]} == 0 )); then
             error 10 "Falta el nombre de la máquina.
 Uso: $0 [opciones] MAQUINA [IP]      (p.ej. $0 server1)
 Consulta la ayuda con -h. En el servidor de la asignatura también puedes
 ejecutarlo sin argumentos desde una terminal: se abre un asistente con menús."
         fi
-        if (( ${#args[@]} > 2 )); then
-            error 10 "Sobran parámetros: '${args[*]}'.
+        if (( ${#ARGS[@]} > 2 )); then
+            error 10 "Sobran parámetros: '${ARGS[*]}'.
 Parece la sintaxis de la versión anterior. Ahora solo se indica el nombre corto
 de la máquina y, opcionalmente, la IP; el disco y la red se deducen de tu usuario:
   $0 [opciones] MAQUINA [IP]      (p.ej. $0 --extra-disks server1 192.168.XXX.2)
 Consulta la ayuda con -h."
         fi
-        MAQUINA="${args[0]}"
-        IP="${args[1]:-}"
+        MAQUINA="${ARGS[0]}"
+        IP="${ARGS[1]:-}"
 
         # De MAQUINA sale el hostname, así que solo se admiten caracteres válidos
         # en un nombre de host
@@ -2764,6 +2758,10 @@ No podrías teclearla en la consola de la máquina virtual.
 Usa solo letras sin tilde, números y signos básicos."
     fi
 
+}
+
+# Nombres que salen de las opciones (dominio, hostname, disco principal)
+calcular_derivados() {
     ########################################
     # Derivados
     ########################################
@@ -2992,16 +2990,14 @@ print_summary_base() {
 # conflicto cuanto antes.
 EXTRAS=()
 calcular_objetivos() {
-    local unidad disco
+    local disco
     if $CLUSTER; then
         objetivos_cluster
         return 0
     fi
     EXTRAS=()
     if $EXTRA_DISKS; then
-        for unidad in "${UNIDADES_EXTRA[@]}"; do
-            EXTRAS+=( "${SILO_DIR}/${PREFIJO_FICHERO}${MAQUINA}-${unidad}.qcow2" )
-        done
+        while IFS= read -r disco; do EXTRAS+=( "$disco" ); done < <(discos_extra "$MAQUINA" "${UNIDADES_EXTRA[@]}")
         for disco in "${EXTRAS[@]}"; do
             if [[ "$disco" == "$DISCO_MAIN" ]]; then
                 error 16 "El nombre de disco '$(basename "$DISCO_MAIN")' coincide con uno de los discos extra que se crearían.
@@ -3013,59 +3009,87 @@ Elige otro nombre para el disco principal."
     OBJ_FICHEROS=( "$DISCO_MAIN" ${EXTRAS[@]+"${EXTRAS[@]}"} )
 }
 
-ejecutar_maquina() {
-    local modo="normal"
-    local disco
+# Crea una máquina: cloud-init, discos y dominio, registrándolo todo para el
+# rollback. Lo usan la máquina suelta, la base GlusterFS y cada nodo del clúster.
+#   crear_maquina DOMINIO HOSTNAME IP MODO DISCO IMAGEN_DE_PARTIDA [DISCO_EXTRA...]
+crear_maquina() {
+    local vm="$1" host="$2" ip="$3" modo="$4" disco="$5" base="$6"
+    shift 6
+    local -a extras=( "$@" )
+    local d
 
+    generar_cloudinit "$vm" "$host" "$ip" "$modo"
+    construir_comando "$vm" "$RAM_MB" "$VCPUS" "$disco" ${extras[@]+"${extras[@]}"}
+
+    echo "→ Creando el disco $(basename "$disco") (copia COW de $(basename "$base"), $TAM_DISCO)…"
+    crear_disco_cow "$disco" "$base" "$TAM_DISCO"
+    if (( ${#extras[@]} > 0 )); then
+        echo "→ Creando ${#extras[@]} discos extra de $TAM_DISCO_EXTRA ($(basename "${extras[0]}") … $(basename "${extras[-1]}"))…"
+        for d in "${extras[@]}"; do
+            crear_disco_vacio "$d" "$TAM_DISCO_EXTRA"
+        done
+    fi
+
+    echo "→ Creando la máquina '$vm' con cloud-init…"
+    crear_dominio "$vm"
+    if [[ -n "$ip" ]]; then
+        IP_ESPERADA[$vm]="$ip"
+    fi
+}
+
+# Plan de --dry-run de una máquina suelta: genera los ficheros (en el
+# directorio .dry-run) y enseña lo que se haría
+mostrar_plan_maquina() {
+    local modo="normal" disco
     if $GLUSTERFS; then
         modo="gluster"
     fi
-
-    # Conflictos con lo que ya exista (y --limpiar, si se pidió)
-    comprobar_conflictos
-
     generar_cloudinit "$VM_NAME" "$HOST_NAME" "$IP" "$modo"
     construir_comando "$VM_NAME" "$RAM_MB" "$VCPUS" "$DISCO_MAIN" ${EXTRAS[@]+"${EXTRAS[@]}"}
 
-    ########################################
-    # Modo simulación: nada de lo de abajo se ejecuta
-    ########################################
+    echo "→ MODO SIMULACIÓN (--dry-run): no se creará ninguna máquina."
+    echo
+    echo "✔ Validaciones superadas."
+    echo "    Usuario : $USUARIO"
+    if [[ -n "$PREFIJO_OPT" ]]; then
+        echo "    Prefijo : $PREFIJO_OPT (sustituye al usuario en los dominios y en los discos)"
+    fi
+    echo "    Máquina : $VM_NAME  (hostname: $HOST_NAME)"
+    echo "    Red     : $NET_NAME (pasarela $NET_GATEWAY, prefijo /$NET_PREFIX)"
+    if [[ -n "$IP" ]]; then
+        echo "    IP      : $IP, disponible para asignación fija"
+    else
+        echo "    IP      : por DHCP"
+    fi
+    echo "    Recursos: ${RAM_MB} MB y ${VCPUS} vCPU"
+    avisar_imagen_falta
+    echo
+    echo "✔ Ficheros cloud-init generados en $WORKDIR/"
+    echo
+    echo "Discos que se crearían en $SILO_DIR:"
+    echo "    $(basename "$DISCO_MAIN")  (copia COW de $(basename "$BASE_IMG"), $TAM_DISCO)"
+    for disco in ${EXTRAS[@]+"${EXTRAS[@]}"}; do
+        echo "    $(basename "$disco")  ($TAM_DISCO_EXTRA)"
+    done
+    echo
+    echo "Comando que se ejecutaría:"
+    echo
+    imprimir_comando
+    echo
+    if $GLUSTERFS; then
+        echo "Al terminar cloud-init, la máquina se apagaría y se eliminaría el dominio,"
+        echo "dejando solo $(basename "$DISCO_MAIN") como imagen base."
+        echo
+    fi
+    echo "No se ha creado ni modificado ninguna máquina, disco ni red."
+}
+
+ejecutar_maquina() {
+    # Conflictos con lo que ya exista (y --limpiar, si se pidió)
+    comprobar_conflictos
+
     if $DRY_RUN; then
-        echo "→ MODO SIMULACIÓN (--dry-run): no se creará ninguna máquina."
-        echo
-        echo "✔ Validaciones superadas."
-        echo "    Usuario : $USUARIO"
-        if [[ -n "$PREFIJO_OPT" ]]; then
-            echo "    Prefijo : $PREFIJO_OPT (sustituye al usuario en los dominios y en los discos)"
-        fi
-        echo "    Máquina : $VM_NAME  (hostname: $HOST_NAME)"
-        echo "    Red     : $NET_NAME (pasarela $NET_GATEWAY, prefijo /$NET_PREFIX)"
-        if [[ -n "$IP" ]]; then
-            echo "    IP      : $IP, disponible para asignación fija"
-        else
-            echo "    IP      : por DHCP"
-        fi
-        echo "    Recursos: ${RAM_MB} MB y ${VCPUS} vCPU"
-        avisar_imagen_falta
-        echo
-        echo "✔ Ficheros cloud-init generados en $WORKDIR/"
-        echo
-        echo "Discos que se crearían en $SILO_DIR:"
-        echo "    $(basename "$DISCO_MAIN")  (copia COW de $(basename "$BASE_IMG"), $TAM_DISCO)"
-        for disco in ${EXTRAS[@]+"${EXTRAS[@]}"}; do
-            echo "    $(basename "$disco")  ($TAM_DISCO_EXTRA)"
-        done
-        echo
-        echo "Comando que se ejecutaría:"
-        echo
-        imprimir_comando
-        echo
-        if $GLUSTERFS; then
-            echo "Al terminar cloud-init, la máquina se apagaría y se eliminaría el dominio,"
-            echo "dejando solo $(basename "$DISCO_MAIN") como imagen base."
-            echo
-        fi
-        echo "No se ha creado ni modificado ninguna máquina, disco ni red."
+        mostrar_plan_maquina
         return 0
     fi
 
@@ -3077,23 +3101,10 @@ ejecutar_maquina() {
         return 0
     fi
 
-    echo "→ Creando el disco $(basename "$DISCO_MAIN") (copia COW de $(basename "$BASE_IMG"), $TAM_DISCO)…"
-    crear_disco_cow "$DISCO_MAIN" "$BASE_IMG" "$TAM_DISCO"
-
-    for disco in ${EXTRAS[@]+"${EXTRAS[@]}"}; do
-        echo "→ Creando el disco extra $(basename "$disco") ($TAM_DISCO_EXTRA)…"
-        crear_disco_vacio "$disco" "$TAM_DISCO_EXTRA"
-    done
-
-    echo "→ Creando la máquina '$VM_NAME' con cloud-init…"
-    crear_dominio "$VM_NAME"
+    crear_maquina "$VM_NAME" "$HOST_NAME" "$IP" normal "$DISCO_MAIN" "$BASE_IMG" ${EXTRAS[@]+"${EXTRAS[@]}"}
     CREACION_COMPLETA=true
     echo "✔ Máquina creada y arrancada."
     echo "-------------------------------------------"
-
-    if [[ -n "$IP" ]]; then
-        IP_ESPERADA[$VM_NAME]="$IP"
-    fi
 
     if $NO_WAIT; then
         echo "Omitiendo la espera (--no-wait activo)."
@@ -3121,6 +3132,8 @@ main() {
     fi
 
     parse_args "$@"
+    validar_opciones
+    calcular_derivados
     validar_entorno
 
     if $MENU; then

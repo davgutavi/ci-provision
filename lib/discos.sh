@@ -32,12 +32,28 @@ crear_disco_vacio() {
 
 # Quita un fichero del registro de creados (cuando pasa a ser definitivo)
 quitar_disco_creado() {
-    local quitar="$1" d
+    quitar_de_lista DISCOS_CREADOS "$1"
+}
+
+# Quita VALOR del array cuyo nombre se indica (por referencia)
+quitar_de_lista() {   # NOMBRE_ARRAY VALOR
+    local -n lista_ref="$1"
+    local quitar="$2" x
     local -a nuevos=()
-    for d in ${DISCOS_CREADOS[@]+"${DISCOS_CREADOS[@]}"}; do
-        if [[ "$d" != "$quitar" ]]; then
-            nuevos+=( "$d" )
+    for x in ${lista_ref[@]+"${lista_ref[@]}"}; do
+        if [[ "$x" != "$quitar" ]]; then
+            nuevos+=( "$x" )
         fi
     done
-    DISCOS_CREADOS=( ${nuevos[@]+"${nuevos[@]}"} )
+    lista_ref=( ${nuevos[@]+"${nuevos[@]}"} )
+}
+
+# Rutas de los discos extra de una máquina, una por línea
+#   discos_extra MAQUINA UNIDAD...
+discos_extra() {
+    local host="$1" u
+    shift
+    for u in "$@"; do
+        echo "${SILO_DIR}/${PREFIJO_FICHERO}${host}-${u}.qcow2"
+    done
 }

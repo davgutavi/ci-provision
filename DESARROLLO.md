@@ -93,3 +93,11 @@ Cada ejecución deja un log completo en el silo (`pruebas-servidor-FECHA.log`).
   para un usuario normal en los servidores de la asignatura.
 - Los nodos del clúster son copias COW de la base con un `instance-id`
   nuevo: eso es lo que hace que cloud-init los vuelva a configurar.
+- `tools/build.sh` concatena las librerías **antes** de `src/main.sh` y solo
+  elimina de este las líneas `source …/lib/*.sh`: nada de las librerías puede
+  ejecutarse a nivel superior dependiendo de variables de `main.sh`, y ningún
+  otro texto de `main.sh` debe empezar por `source `.
+- El flujo de `main` es `parse_args` → `validar_opciones` →
+  `calcular_derivados` → `validar_entorno` → modo. Toda máquina (suelta, base
+  GlusterFS o nodo) se crea con `crear_maquina`, que registra lo creado para
+  el rollback.
