@@ -71,7 +71,8 @@ que cargarla en el agente (`eval "$(ssh-agent -s)" && ssh-add`). Variables:
 
 - `LIMPIAR=1`: en la fase C, pasa `--limpiar` al script si ya existen
   `server1`..`4` o `glusterbase` (el script enumera qué borra).
-- `CONSERVAR=1`: no elimina las máquinas de prueba al terminar cada fase.
+- `CONSERVAR=1`: en la fase B, no elimina las máquinas al terminar (la fase C
+  siempre conserva el clúster).
 
 Cada ejecución deja un log completo en el silo (`pruebas-servidor-FECHA.log`).
 

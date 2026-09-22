@@ -489,9 +489,20 @@ qinfo() {
     assert_failure 10
 }
 
-@test "--glusterfs: si cloud-init falla, error 71 y no queda ni disco ni dominio" {
+@test "--glusterfs: si cloud-init falla, error 71 y la máquina se conserva para examinarla" {
     MOCK_CI_RESULT=error run bash "$SCRIPT" --glusterfs glusterbase
     assert_failure 71
+    assert_output --partial "se conserva"
+    assert_output --partial "virsh console ${USUARIO}-glusterbase"
+    dominio_existe "${USUARIO}-glusterbase"
+    [ -e "$SILO/glusterbase.qcow2" ]
+    refute_output --partial "Deshaciendo"
+}
+
+@test "--glusterfs: si no se puede consultar cloud-init, no se asume; error 70 y rollback" {
+    MOCK_EXEC_UNSUPPORTED=1 run bash "$SCRIPT" --glusterfs glusterbase
+    assert_failure 70
+    assert_output --partial "No se ha podido confirmar"
     ! dominio_existe "${USUARIO}-glusterbase"
     [ ! -e "$SILO/glusterbase.qcow2" ]
 }
@@ -540,6 +551,91 @@ qinfo() {
     assert_failure 20
     run bash "$SCRIPT" server1 --prefijo
     assert_failure 11
+}
+
+@test "si virt-install falla después de definir el dominio, el rollback también lo elimina" {
+    MOCK_VIRT_INSTALL_FALLA_TARDE=1 run bash "$SCRIPT" --extra-disks server1
+    assert_failure
+    assert_output --partial "dominio '${USUARIO}-server1' eliminado"
+    ! dominio_existe "${USUARIO}-server1"
+    [ ! -e "$SILO/server1.qcow2" ] && [ ! -e "$SILO/server1-vdg.qcow2" ]
+}
+
+@test "combinaciones incompatibles: error 10 (y --disco igual a un disco extra: 16)" {
+    run bash "$SCRIPT" --dry-run --glusterfs --extra-disks glusterbase
+    assert_failure 10
+    run bash "$SCRIPT" --dry-run --glusterfs glusterbase 192.168.7.5
+    assert_failure 10
+    run bash "$SCRIPT" --dry-run --gluster-cluster --glusterfs
+    assert_failure 10
+    run bash "$SCRIPT" --dry-run --gluster-cluster --extra-disks
+    assert_failure 10
+    run bash "$SCRIPT" --dry-run --extra-disks --disco server1-vdb.qcow2 server1
+    assert_failure 16
+}
+
+@test "opciones con valor: sin valor, con valor vacío o con '=' se explican (11/12)" {
+    run bash "$SCRIPT" --ssh-pass --extra-disks server1
+    assert_failure 11
+    run bash "$SCRIPT" --ram "" server1
+    assert_failure 11
+    run bash "$SCRIPT" --ram=4096 server1
+    assert_failure 12
+    assert_output --partial "--ram 4096"
+}
+
+@test "el nombre de máquina no debe llevar el usuario delante: error 20" {
+    run bash "$SCRIPT" --dry-run "${USUARIO}-server1"
+    assert_failure 20
+    assert_output --partial "'server1'"
+    run bash "$SCRIPT" --dry-run --prefijo demo demo-server1
+    assert_failure 20
+}
+
+@test "--limpiar se niega a borrar un disco que usa otra máquina o que es respaldo de otra copia" {
+    run bash "$SCRIPT" --disco server1.qcow2 otra
+    assert_success
+    run bash "$SCRIPT" --limpiar server1 </dev/null
+    assert_failure 21
+    assert_output --partial "lo usa la máquina '${USUARIO}-otra'"
+    dominio_existe "${USUARIO}-otra"
+    [ -e "$SILO/server1.qcow2" ]
+
+    run bash "$SCRIPT" --glusterfs glusterbase
+    assert_success
+    (cd "$SILO" && qemu-img create -f qcow2 -b glusterbase.qcow2 -F qcow2 nodo1.qcow2 40G >/dev/null)
+    run bash "$SCRIPT" --limpiar --glusterfs glusterbase </dev/null
+    assert_failure 21
+    assert_output --partial "imagen base de nodo1.qcow2"
+    [ -e "$SILO/glusterbase.qcow2" ]
+}
+
+@test "clave pública con dos claves, vacía o que no lo es: error 31" {
+    printf 'ssh-rsa AAAA a@b\nssh-ed25519 BBBB c@d\n' > "$HOME/.ssh/id_rsa.pub"
+    run bash "$SCRIPT" --dry-run server1
+    assert_failure 31
+    : > "$HOME/.ssh/id_rsa.pub"
+    run bash "$SCRIPT" --dry-run server1
+    assert_failure 31
+    echo "esto no es una clave" > "$HOME/.ssh/id_rsa.pub"
+    run bash "$SCRIPT" --dry-run server1
+    assert_failure 31
+}
+
+@test "--tam menor que la imagen de partida: error 15" {
+    run bash "$SCRIPT" --dry-run --tam 1G server1
+    assert_failure 15
+    qemu-img create -f qcow2 "$SILO/mibase.qcow2" 40G >/dev/null
+    run bash "$SCRIPT" --dry-run --tam 20G --base mibase.qcow2 server1
+    assert_failure 15
+    run bash "$SCRIPT" --dry-run --tam 40G --base mibase.qcow2 server1
+    assert_success
+}
+
+@test "una máquina llamada como la imagen base: error 10 sin hablar de --base" {
+    run bash "$SCRIPT" --dry-run debian12
+    assert_failure 10
+    refute_output --partial "--base"
 }
 
 @test "--ram y --vcpus llegan a virt-install" {
@@ -796,11 +892,13 @@ qinfo() {
     [ ! -e "$SILO/server1.qcow2" ]
 }
 
-@test "clúster: si cloud-init falla en la base, error 71 y rollback" {
+@test "clúster: si cloud-init falla en la base, error 71, la base se conserva y no hay nodos" {
     MOCK_CI_RESULT=error run bash "$SCRIPT" --gluster-cluster
     assert_failure 71
-    ! dominio_existe "${USUARIO}-glusterbase"
-    [ ! -e "$SILO/glusterbase.qcow2" ]
+    dominio_existe "${USUARIO}-glusterbase"
+    [ -e "$SILO/glusterbase.qcow2" ]
+    ! dominio_existe "${USUARIO}-server1"
+    [ ! -e "$SILO/server1.qcow2" ]
 }
 
 @test "clúster con --no-wait: espera a la base pero no a los nodos" {

@@ -22,6 +22,7 @@ declare -A ESTADO_CI=()        # dominio → done | error | asumido
 declare -A IP_ESPERADA=()      # dominio → IP fija que debe tener (si la hay)
 declare -A FALLOS_CONSULTA=()  # dominio → veces seguidas sin poder consultar cloud-init
 declare -A ASUMIDO_DESDE=()    # dominio → instante en que se empezó a asumir que está lista
+EXIGIR_ESTADO_CI=false         # true: no vale asumir; hace falta leer el estado de cloud-init (la base GlusterFS)
 
 limpiar_linea() {
     if [[ -t 1 ]]; then
@@ -54,7 +55,7 @@ cloudinit_status() {
         return 1
     fi
 
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4 5 6 7 8 9 10; do
         sleep 1
         s="$(virsh qemu-agent-command "$vm" --timeout 5 \
               "{\"execute\":\"guest-exec-status\",\"arguments\":{\"pid\":${pid}}}" \
@@ -62,7 +63,7 @@ cloudinit_status() {
         exited="$(jq -r '.return.exited // empty' <<< "$s" 2>/dev/null || true)"
         if [[ "$exited" == "true" ]]; then
             datos="$( { jq -r '.return."out-data" // empty' <<< "$s" | base64 -d; } 2>/dev/null || true)"
-            sed -n 's/^status: *//p' <<< "$datos"
+            awk '/^status:/ { sub(/^status: */, ""); print; exit }' <<< "$datos"
             return 0
         fi
     done
@@ -86,6 +87,7 @@ maquina_lista() {
 
     if estado="$(cloudinit_status "$vm")"; then
         FALLOS_CONSULTA[$vm]=0
+        unset 'ASUMIDO_DESDE[$vm]'
         case "$estado" in
             done)
                 IPS_DETECTADAS[$vm]="$ip"
@@ -109,7 +111,7 @@ maquina_lista() {
     n=$(( ${FALLOS_CONSULTA[$vm]:-0} + 1 ))
     FALLOS_CONSULTA[$vm]=$n
 
-    if (( n >= 3 )); then
+    if (( n >= 3 )) && ! $EXIGIR_ESTADO_CI; then
         if [[ -z "${ASUMIDO_DESDE[$vm]:-}" ]]; then
             ASUMIDO_DESDE[$vm]=$SECONDS
         elif (( SECONDS - ASUMIDO_DESDE[$vm] >= GRACE_SECS )); then

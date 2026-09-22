@@ -181,7 +181,9 @@ El script siempre crea máquinas y discos **nuevos**. Si ya existe alguno de los
 que va a crear, se detiene y te dice cuáles son y cómo eliminarlos. Con
 `--limpiar` los elimina él, pero **únicamente esos**: nunca toca otro dominio ni
 otro fichero de tu silo. Antes de hacerlo te enseña la lista y te pide
-confirmación por teclado.
+confirmación por teclado. Y si uno de esos discos lo está usando otra de tus
+máquinas, o es la imagen base de otras copias, no lo borra: se detiene y te lo
+explica.
 
 ---
 
@@ -362,7 +364,9 @@ usan los ejercicios del boletín (por ejemplo, `virsh detach-disk usuario-server
 $PWD/server1-vdb.qcow2`).
 
 Con `--gluster-cluster` se genera un directorio `cloudinit-*` por máquina (la
-base y cada nodo).
+base y cada nodo), y queda además `glusterbase.qcow2`, la imagen de la que son
+copia los cuatro nodos. Con `--dry-run`, los ficheros van a `cloudinit-*.dry-run/`;
+esos directorios los puedes borrar cuando quieras.
 
 > ⚠️ Los ficheros `cloudinit-*` contienen las contraseñas en texto plano, así que
 > el directorio se crea con permisos `700` (solo tú puedes leerlo). Recuerda que
@@ -375,16 +379,16 @@ base y cada nodo).
 | Código | Descripción | Solución |
 |--------|-------------|-----------|
 | **10** | Faltan o sobran parámetros, u opciones incompatibles | Revisa la sintaxis: `MAQUINA [IP]` |
-| **11** | Falta el valor de una opción | Añádelo |
-| **12** | Opción desconocida (u obsoleta) | Consulta `-h` |
+| **11** | Falta el valor de una opción, o está vacío | Escríbelo después de la opción, separado por un espacio |
+| **12** | Opción desconocida, obsoleta o escrita con `=` | Consulta `-h`; las opciones van separadas de su valor por un espacio |
 | **13** | RAM o vCPUs no válidas | Números; mínimo 512 MB y 1 vCPU |
 | **14** | Contraseña con caracteres no ASCII | Sin tildes ni `ñ`: no podrías teclearla en la consola |
-| **15** | Tamaño de disco no válido | Formato `40G`, `20G`, `512M` |
+| **15** | Tamaño de disco no válido, o menor que la imagen de partida | Formato `40G`, `20G`, `512M`; nunca menor que la imagen |
 | **16** | Nombre de disco o de imagen no válido | Solo el nombre del fichero, sin rutas |
-| **20** | Nombre de máquina o prefijo (`--prefijo`) no válido | Solo letras, números y guiones |
-| **21** | Ya existe el dominio o algún disco | El mensaje indica cómo eliminarlos, o usa `--limpiar` |
+| **20** | Nombre de máquina o prefijo (`--prefijo`) no válido | Solo letras, números y guiones; sin tu usuario delante |
+| **21** | Ya existe el dominio o algún disco, o un disco lo usa otra máquina | El mensaje indica cómo eliminarlos, o usa `--limpiar` |
 | **30** | No existe el silo | Crear `$HOME/imagenesMV` y mapearlo en el hipervisor |
-| **31** | No existe la clave pública | `ssh-keygen` |
+| **31** | No existe la clave pública, o el fichero no contiene una sola clave | `ssh-keygen` |
 | **37** | No se ha podido descargar la imagen base, o la que hay está corrupta | El mensaje indica el `wget` manual, o el `rm` para que el script la vuelva a descargar |
 | **38** | Faltan herramientas (incluido `wget`/`curl` para descargar la imagen) o no hay conexión con libvirt | Avisar al profesor |
 | **39** | La imagen indicada con `--base` no existe o no es un `qcow2` | Revisa el nombre; debe estar en el silo |
@@ -394,8 +398,8 @@ base y cada nodo).
 | **43** | No se puede interpretar la red | Revisar `virsh net-dumpxml TU_RED` |
 | **44** | Tienes varias redes virtuales | Indica cuál con `--red` |
 | **45** | Tu red virtual está inactiva | `virsh net-start TU_RED` |
-| **70** | La imagen base GlusterFS no ha terminado o no se ha apagado | Reintentar; revisar la carga del servidor |
-| **71** | cloud-init ha fallado en la imagen base GlusterFS | Revisar con `virsh console` |
+| **70** | No se ha podido confirmar que la imagen base GlusterFS haya terminado, o no se ha apagado | Reintentar; revisar la carga del servidor |
+| **71** | cloud-init ha fallado en la imagen base GlusterFS | La máquina se conserva: revísala con `virsh console`; después repite con `--limpiar` |
 
 ---
 
@@ -407,7 +411,7 @@ No las necesitas en los [casos de uso](#casos-de-uso).
 | Opción | Descripción |
 |--------|-------------|
 | `--dry-run` | Comprueba los datos y muestra lo que se haría, **sin crear nada** |
-| `--no-wait` | No espera a que la máquina termine de configurarse (no válida con `--glusterfs`) |
+| `--no-wait` | No espera a que la máquina termine de configurarse (no válida con `--glusterfs`; con `--gluster-cluster` solo afecta a los nodos: la imagen base se espera siempre) |
 | `--red NOMBRE` | Red virtual a usar, si no se llama `TU_USUARIO-red` o tienes varias |
 | `--prefijo PREFIJO` | Sustituye a tu usuario en los nombres de todo lo que crea el script (dominios y discos). Ver abajo |
 | `--disco NOMBRE` | Nombre del disco principal (por defecto `MAQUINA.qcow2`) |
@@ -447,7 +451,7 @@ script**: dominios `PREFIJO-MAQUINA`, discos `PREFIJO-MAQUINA.qcow2` y
 `PREFIJO-MAQUINA-vdb.qcow2`, imagen base `PREFIJO-glusterbase.qcow2` y directorios
 `cloudinit-PREFIJO-*`. Así puedes tener dos juegos de máquinas en el mismo silo sin
 que se pisen, y `--limpiar` nunca toca los del otro prefijo. El hostname (`server1`) y
-la red no cambian.
+la red no cambian. Si además usas `--disco`, ese nombre manda tal cual, sin prefijo.
 
 ```bash
 ./ci-provision.sh --prefijo demo --gluster-cluster

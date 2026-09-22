@@ -12,7 +12,8 @@
 # Variables opcionales:
 #   LIMPIAR=1        En la fase C, pasa --limpiar al script si ya existen
 #                    server1..4 o glusterbase (el propio script enumera qué borra).
-#   CONSERVAR=1      No eliminar las máquinas de prueba al terminar cada fase.
+#   CONSERVAR=1      En la fase B, no eliminar las máquinas al terminar (la fase C
+#                    siempre conserva el clúster).
 #
 # Antes de las fases B y C carga tu clave en el agente SSH:  ssh-add
 
@@ -147,6 +148,10 @@ fase_a() {
     espera_codigo 12 "opción antigua --enable-root"            --enable-root pruebas1
     espera_codigo 12 "opción antigua --user-pass"              --user-pass x pruebas1
     espera_codigo 12 "opción antigua --virt-viewer"            --virt-viewer pruebas1
+    espera_codigo 12 "opción con = en vez de espacio"          --dry-run --ram=2048 pruebas1
+    espera_codigo 11 "--ssh-pass seguido de otra opción"       --dry-run --ssh-pass --extra-disks pruebas1
+    espera_codigo 10 "--glusterfs con --extra-disks"           --dry-run --glusterfs --extra-disks pruebasgluster
+    espera_codigo 20 "nombre con el usuario delante"           --dry-run "${USUARIO}-pruebas1"
     espera_codigo 12 "opción desconocida"                      --noexiste pruebas1
     espera_codigo 11 "opción sin valor"                        pruebas1 --ram
     espera_codigo 20 "nombre de máquina inválido"              "a b"
@@ -398,11 +403,7 @@ fase_c() {
     en_vm_es "$ip" "server3: glusterd en ejecución"       "active"       systemctl is-active glusterd
 
     echo
-    if [[ -z "${CONSERVAR:-}" ]]; then
-        info "El clúster se conserva para que puedas inspeccionarlo. Para eliminarlo:"
-    else
-        info "Para eliminar el clúster:"
-    fi
+    info "El clúster se conserva para que puedas inspeccionarlo. Para eliminarlo:"
     echo "      for m in server1 server2 server3 server4; do virsh destroy ${USUARIO}-\$m; virsh undefine ${USUARIO}-\$m --snapshots-metadata; done"
     echo "      cd $SILO && rm -f glusterbase.qcow2 server[1-4].qcow2 server[1-4]-vd?.qcow2 && rm -rf cloudinit-${USUARIO}-*"
 }

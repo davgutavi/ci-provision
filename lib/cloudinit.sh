@@ -115,7 +115,7 @@ EOF
         echo "    shell: /bin/bash"
         echo "    sudo: ['ALL=(ALL) NOPASSWD:ALL']"
         echo "    ssh-authorized-keys:"
-        echo "      - $(cat "$PUBKEY_PATH")"
+        echo "      - $PUBKEY"
 
         # root tiene contraseña para poder entrar por consola (por SSH no
         # entra: sshd de Debian trae PermitRootLogin prohibit-password).

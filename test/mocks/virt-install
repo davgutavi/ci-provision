@@ -2,7 +2,8 @@
 # virt-install simulado para los tests locales (sin libvirt).
 # Crea el dominio en $MOCK_STATE/dominios/NOMBRE con lo que le llega.
 #
-#   MOCK_VIRT_INSTALL_FALLA=1   falla sin crear nada, como si libvirt diera error
+#   MOCK_VIRT_INSTALL_FALLA=1        falla sin crear nada, como si libvirt diera error
+#   MOCK_VIRT_INSTALL_FALLA_TARDE=1  define el dominio y luego falla (error tardío o Ctrl+C)
 
 S="${MOCK_STATE:?MOCK_STATE no definido}"
 mkdir -p "$S/dominios"
@@ -67,5 +68,10 @@ if [[ -z "$ip" ]]; then
     ip="$(cat "$S/dhcp_base" 2>/dev/null || echo 192.168.7).$(( 200 + n ))"
 fi
 echo "$ip" > "$dir/ip"
+
+if [[ -n "${MOCK_VIRT_INSTALL_FALLA_TARDE:-}" ]]; then
+    echo "ERROR    error simulado de virt-install tras definir el dominio" >&2
+    exit 1
+fi
 
 exit 0

@@ -83,15 +83,32 @@ crear_base_gluster() {
     echo "→ Creando la máquina '$vm' con cloud-init…"
     crear_dominio "$vm"
 
-    if ! esperar_maquinas "$vm"; then
-        error 70 "La máquina '$vm' no ha terminado de configurarse en ${WAIT_TIMEOUT}s.
-Sin eso no puede servir de base. Comprueba la carga del servidor y vuelve a intentarlo."
+    # Para una base no vale "se da por terminada": si no se puede consultar
+    # cloud-init, se sigue esperando hasta agotar el tiempo
+    local lista=true acceso
+    EXIGIR_ESTADO_CI=true
+    esperar_maquinas "$vm" || lista=false
+    EXIGIR_ESTADO_CI=false
+    if ! $lista; then
+        error 70 "No se ha podido confirmar que cloud-init haya terminado en '$vm' en ${WAIT_TIMEOUT}s.
+Sin esa confirmación no puede servir de base. Comprueba la carga del servidor y vuelve a intentarlo."
     fi
 
-    if [[ "${ESTADO_CI[$vm]}" == "error" ]]; then
+    if [[ "${ESTADO_CI[$vm]}" != "done" ]]; then
+        # Se conserva la máquina para poder examinarla
+        CREACION_COMPLETA=true
+        if $NO_ROOT; then
+            acceso="ssh administrador@${IPS_DETECTADAS[$vm]:-IP}    (con tu clave)"
+        else
+            acceso="virsh console $vm    (root, contraseña ${PASS_CONSOLA})"
+        fi
         error 71 "cloud-init ha terminado con errores en '$vm' (probablemente al instalar
 glusterfs-server). Las copias heredarían el problema, así que se detiene aquí.
-Puedes verlo con: virsh console $vm  (root, contraseña ${PASS_CONSOLA}) y cloud-init status --long"
+La máquina se conserva para que puedas examinarla:
+  $acceso
+  y dentro: cloud-init status --long
+Cuando termines, repite el comando añadiendo --limpiar, o elimínala tú:
+  virsh destroy $vm; virsh undefine $vm --snapshots-metadata; rm $disco"
     fi
 
     echo "→ Apagando '$vm'…"

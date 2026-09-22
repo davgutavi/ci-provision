@@ -17,9 +17,9 @@ BASE_IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-ge
 # Usuario del servidor: de él salen los nombres de los dominios y el de la red
 USUARIO="$(id -un)"
 
-# Contraseña de consola de 'administrador' y de 'root' (la misma que usa el
-# manual de laboratorio). Por SSH se entra siempre con clave; solo con
-# --ssh-pass se admite contraseña, y entonces la elige el alumno.
+# Contraseña de consola de 'root' (la misma que usa el manual de laboratorio).
+# 'administrador' no tiene contraseña: por SSH se entra con clave; solo con
+# --ssh-pass se le da una, y entonces la elige el alumno.
 PASS_CONSOLA="s1st3mas"
 
 # Discos
@@ -142,12 +142,18 @@ revertir_cambios() {
 
     local dominio disco
     for dominio in ${DOMINIOS_CREADOS[@]+"${DOMINIOS_CREADOS[@]}"}; do
+        # Se registra antes de lanzar virt-install: puede que no llegara a definirlo
+        virsh dominfo "$dominio" >/dev/null 2>&1 || continue
         virsh destroy  "$dominio" >/dev/null 2>&1 || true
-        virsh undefine "$dominio" --snapshots-metadata >/dev/null 2>&1 || true
-        echo "  - dominio '$dominio' eliminado" >&2
+        if virsh undefine "$dominio" --snapshots-metadata >/dev/null 2>&1; then
+            echo "  - dominio '$dominio' eliminado" >&2
+        else
+            echo "  - dominio '$dominio': no se ha podido eliminar. Hazlo tú: virsh undefine $dominio --snapshots-metadata" >&2
+        fi
     done
 
     for disco in ${DISCOS_CREADOS[@]+"${DISCOS_CREADOS[@]}"}; do
+        [[ -e "$disco" ]] || continue
         if rm -f "$disco"; then
             echo "  - disco '$disco' eliminado" >&2
         fi
@@ -158,6 +164,9 @@ revertir_cambios() {
 
 al_salir() {
     local code=$?
+    # Un fallo aquí dentro (p.ej. un echo con el terminal ya cerrado) no debe
+    # impedir que se deshaga lo creado
+    set +e
 
     if (( code == 0 )); then
         return 0
@@ -173,7 +182,7 @@ al_salir() {
     fi
 
     if $CREACION_COMPLETA; then
-        echo "Las máquinas ya estaban creadas: no se deshace nada. Comprueba su estado con:" >&2
+        echo "Lo creado se conserva: no se deshace nada. Comprueba su estado con:" >&2
         echo "  virsh list --all" >&2
     else
         revertir_cambios
@@ -181,7 +190,7 @@ al_salir() {
 }
 
 trap al_salir EXIT
-trap 'INTERRUMPIDO=true; exit 130' INT TERM
+trap 'INTERRUMPIDO=true; exit 130' INT TERM HUP
 
 ########################################
 # Función de ayuda
@@ -236,6 +245,7 @@ Opciones:
                        clave pública). Solo caracteres ASCII.
   --dry-run            Comprueba los datos y muestra lo que se haría, SIN crear nada
   --no-wait            No esperar a que cloud-init termine de configurar la máquina
+                       (en el clúster solo afecta a los nodos: la base se espera siempre)
   -h, --help           Muestra esta ayuda
 
 En todas las máquinas:
@@ -246,7 +256,7 @@ En todas las máquinas:
     sin contraseña.
   - Consola gráfica activa (virt-viewer), salvo con --no-virt-viewer.
 
-Ejemplos:
+Ejemplos (XXX es el tercer número de tu red virtual; lo ves en el resumen de --dry-run):
   $0 server1                                    # DHCP
   $0 --extra-disks server1 192.168.XXX.2        # SERVER1 del boletín 2, epígrafe 2.1
   $0 --gluster-cluster                          # infraestructura del boletín 2, epígrafe 2.4
@@ -273,8 +283,11 @@ parse_args() {
             --no-root)         NO_ROOT=true;     shift ;;
             --no-virt-viewer)  NO_GRAFICOS=true; shift ;;
             --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass|--prefijo)
-                if [[ $# -lt 2 ]]; then
-                    error 11 "Falta el valor de la opción $1"
+                if [[ $# -lt 2 || "$2" == --* ]]; then
+                    error 11 "Falta el valor de la opción $1. Escríbelo a continuación, separado por un espacio: $1 VALOR"
+                fi
+                if [[ -z "$2" ]]; then
+                    error 11 "La opción $1 no admite un valor vacío."
                 fi
                 case "$1" in
                     --red)      RED_OPT="$2"   ;;
@@ -308,6 +321,9 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
                 args+=("$@")
                 break
                 ;;
+            --*=*)
+                error 12 "La opción '${1%%=*}' se escribe con un espacio, no con '=': ${1%%=*} ${1#*=}"
+                ;;
             -*)
                 error 12 "Opción desconocida '$1'. Consulta la ayuda con -h."
                 ;;
@@ -333,6 +349,10 @@ cuando cloud-init termine, así que es imprescindible esperar."
         if [[ -n "$DISCO_OPT" ]]; then
             error 10 "La opción --disco no se aplica a --gluster-cluster: los discos se llaman como los nodos."
         fi
+        if $GLUSTERFS || $EXTRA_DISKS; then
+            error 10 "--gluster-cluster ya construye la imagen base y los ${#UNIDADES_CLUSTER[@]} discos de cada nodo:
+no se combina con --glusterfs ni con --extra-disks."
+        fi
     else
         if (( ${#args[@]} == 0 )); then
             error 10 "Falta el nombre de la máquina.
@@ -354,6 +374,24 @@ Consulta la ayuda con -h."
         if ! [[ "$MAQUINA" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || (( ${#MAQUINA} > 63 )); then
             error 20 "El nombre de máquina '$MAQUINA' no es válido.
 Solo letras, números y guiones, empezando por letra o número (p.ej. server1, gluster-base)."
+        fi
+
+        # El usuario (o el prefijo) lo antepone el script: 'usuario-server1'
+        # daría 'usuario-usuario-server1', que nadie quiere
+        local pref="${PREFIJO_OPT:-$USUARIO}"
+        if [[ "${MAQUINA,,}" == "${pref,,}-"* ]]; then
+            error 20 "El nombre de máquina '$MAQUINA' ya empieza por '$pref-': el dominio sería '${pref}-${MAQUINA}'.
+Indica solo el nombre corto (p.ej. '${MAQUINA#"${MAQUINA%%-*}-"}'); '$pref-' lo antepone el script."
+        fi
+
+        if $GLUSTERFS && $EXTRA_DISKS; then
+            error 10 "--extra-disks no se combina con --glusterfs: la imagen base es un solo disco,
+que es lo único que queda al terminar. Los discos extra se crean al hacer las copias
+(p.ej. --gluster-cluster, o --extra-disks --base ${MAQUINA}.qcow2 server1)."
+        fi
+        if $GLUSTERFS && [[ -n "$IP" ]]; then
+            error 10 "Con --glusterfs no se indica IP: la máquina es provisional (se elimina al terminar)
+y la IP la reciben las copias que hagas de ${MAQUINA}.qcow2."
         fi
     fi
 
@@ -512,8 +550,10 @@ imprimir_comando() {
 # Ejecuta virt-install y registra el dominio para poder deshacerlo
 crear_dominio() {
     local nombre="$1"
-    "${VIRT_INSTALL_CMD[@]}"
+    # Se registra ANTES de lanzarlo: si virt-install define el dominio y luego
+    # falla (o llega un Ctrl+C), el rollback tiene que eliminarlo
     DOMINIOS_CREADOS+=( "$nombre" )
+    "${VIRT_INSTALL_CMD[@]}"
 }
 
 # En --dry-run, si la imagen base no está en el silo
@@ -619,6 +659,12 @@ ejecutar_maquina() {
     if $EXTRA_DISKS; then
         for unidad in "${UNIDADES_EXTRA[@]}"; do
             extras+=( "${SILO_DIR}/${PREFIJO_FICHERO}${MAQUINA}-${unidad}.qcow2" )
+        done
+        for disco in "${extras[@]}"; do
+            if [[ "$disco" == "$DISCO_MAIN" ]]; then
+                error 16 "El nombre de disco '$(basename "$DISCO_MAIN")' coincide con uno de los discos extra que se crearían.
+Elige otro nombre para el disco principal."
+            fi
         done
     fi
 

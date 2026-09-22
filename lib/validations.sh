@@ -1,10 +1,10 @@
 ########################################
 # Datos de la red virtual (se rellenan en load_network_info)
 ########################################
+PUBKEY=""          # la clave pública del usuario, ya validada (una sola línea)
 NET_GATEWAY=""
 NET_NETMASK=""
 NET_PREFIX=""
-NET_DOMAIN=""
 NET_DHCP_STARTS=()
 NET_DHCP_ENDS=()
 NET_RESERVED=()
@@ -199,13 +199,6 @@ Consulta las redes disponibles con: virsh net-list --all"
         error 43 "La pasarela '$NET_GATEWAY' de la red '$NET_NAME' no es una IPv4 válida."
     fi
 
-    # Nombre de dominio de la red (puede no existir)
-    local domline
-    domline="$( { printf '%s\n' "$xml" | grep -E '<domain[[:space:]]' | head -n1; } || true )"
-    if [[ -n "$domline" ]]; then
-        NET_DOMAIN="$(xml_attr "$domline" name)"
-    fi
-
     # Rangos DHCP (puede haber varios)
     local line
     while IFS= read -r line; do
@@ -383,10 +376,34 @@ comprobar_base_no_objetivo() {
     local f
     for f in ${OBJ_FICHEROS[@]+"${OBJ_FICHEROS[@]}"}; do
         if [[ "$f" == "$BASE_IMG" ]]; then
-            error 10 "La imagen indicada con --base ($(basename "$BASE_IMG")) es uno de los discos que se crearían.
+            if [[ -n "$BASE_OPT" ]]; then
+                error 10 "La imagen indicada con --base ($(basename "$BASE_IMG")) es uno de los discos que se crearían.
 Elige otra imagen o cambia el nombre de la máquina."
+            fi
+            error 10 "El disco que se crearía se llama $(basename "$BASE_IMG"), que es la imagen de la que
+salen todas las máquinas. Ponle otro nombre a la máquina (p.ej. server1)."
         fi
     done
+}
+
+# --tam no puede ser menor que la imagen de la que se hace la copia: qemu-img
+# lo admite, pero la máquina arrancaría con el sistema de ficheros truncado
+comprobar_tam_disco() {
+    local vs n tam_b
+    [[ -f "$BASE_IMG" ]] || return 0
+    vs="$(qemu-img info -U --output=json "$BASE_IMG" 2>/dev/null | jq -r '."virtual-size" // empty' 2>/dev/null || true)"
+    [[ "$vs" =~ ^[0-9]+$ ]] || return 0
+    n="${TAM_DISCO%[MGT]}"
+    case "${TAM_DISCO: -1}" in
+        M) tam_b=$(( n * 1024 * 1024 )) ;;
+        G) tam_b=$(( n * 1024 * 1024 * 1024 )) ;;
+        T) tam_b=$(( n * 1024 * 1024 * 1024 * 1024 )) ;;
+        *) return 0 ;;
+    esac
+    if (( tam_b < vs )); then
+        error 15 "El tamaño --tam $TAM_DISCO es menor que el de la imagen $(basename "$BASE_IMG") ($(( (vs + 1073741823) / 1073741824 )) GiB):
+la copia quedaría truncada y la máquina no arrancaría bien. Indica un tamaño igual o mayor."
+    fi
 }
 
 comprobar_imagen_base() {
@@ -456,9 +473,20 @@ validar_entorno() {
 Crea ese directorio y mapéalo como silo en el hipervisor."
     fi
 
-    # Clave pública existente
+    # Clave pública existente y con una sola clave: va tal cual dentro del
+    # user-data, y una segunda línea (o un fichero vacío) lo dejaría inválido
     if [[ ! -f "$PUBKEY_PATH" ]]; then
         error 31 "No existe la clave pública en $PUBKEY_PATH. Genera una con: ssh-keygen"
+    fi
+    local claves re
+    claves="$(grep -c '[^[:space:]]' "$PUBKEY_PATH" || true)"
+    PUBKEY="$(grep -m1 '[^[:space:]]' "$PUBKEY_PATH" || true)"
+    PUBKEY="${PUBKEY%"${PUBKEY##*[![:space:]]}"}"
+    re='^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp[0-9]+|sk-(ssh-ed25519|ecdsa-sha2-nistp256))(@openssh\.com)? '
+    if (( claves != 1 )) || ! [[ "$PUBKEY" =~ $re ]]; then
+        error 31 "El fichero $PUBKEY_PATH debe contener una sola clave pública: una línea que empiece
+por ssh-rsa, ssh-ed25519 o ecdsa-sha2-… (ahora tiene $claves líneas con contenido).
+Si no la tienes, genera una pareja de claves nueva con: ssh-keygen"
     fi
 
     # Red: elegirla y leer sus datos reales
@@ -479,4 +507,5 @@ Crea ese directorio y mapéalo como silo en el hipervisor."
     # La imagen base, en último lugar: si falta hay que descargarla, y no
     # tiene sentido hacerlo para fallar después por un dato mal escrito
     comprobar_imagen_base
+    comprobar_tam_disco
 }
