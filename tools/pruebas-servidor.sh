@@ -116,6 +116,10 @@ descubrir_red() {
     RED="$(sed -n 's/^    Red     : \([^ ]*\).*/\1/p' <<< "$salida" | head -1)"
     GW="$(sed -n 's/.*pasarela \([0-9.]*\),.*/\1/p' <<< "$salida" | head -1)"
 
+    # Una IP dentro del rango DHCP de la red real (la primera del primer rango)
+    IP_DHCP="$(virsh net-dumpxml "$RED" 2>/dev/null | sed -n "s/.*<range start='\([0-9.]*\)'.*/\1/p" | head -1)"
+    [[ -n "$IP_DHCP" ]] || IP_DHCP="${GW%.*}.200"
+
     # Pedimos una IP que no puede ser de ninguna red (203.0.113.0/24 está
     # reservada para documentación): falla con 41 y enumera los bloques libres
     salida="$(ejecutar_script --dry-run pruebas1 203.0.113.9 2>&1)"
@@ -138,6 +142,7 @@ descubrir_red() {
 # Fase A: validaciones (no crea nada)
 ########################################
 fase_a() {
+    local salida
     titulo "Fase A: validaciones (no se crea nada)"
     descubrir_red
     info "Red detectada: $RED (pasarela $GW). IP libre para pruebas: ${IP_LIBRE:-ninguna}"
@@ -166,7 +171,7 @@ fase_a() {
     espera_codigo 41 "IP que es la pasarela"                   --dry-run pruebas1 "$GW"
     espera_codigo 41 "IP de otra subred"                       --dry-run pruebas1 10.9.9.9
     espera_codigo 41 "IP mal formada"                          --dry-run pruebas1 192.168.1.999
-    espera_codigo 42 "IP dentro del rango DHCP"                --dry-run pruebas1 "${GW%.*}.200"
+    espera_codigo 42 "IP dentro del rango DHCP"                --dry-run pruebas1 "$IP_DHCP"
     espera_codigo 10 "--gluster-cluster con MAQUINA"           --dry-run --gluster-cluster pruebas1
     if [[ -n "$IP_LIBRE" ]]; then
         espera_codigo 0 "--dry-run con IP libre y discos extra" --dry-run --limpiar --extra-disks pruebas1 "$IP_LIBRE"
@@ -185,7 +190,7 @@ fase_a() {
 
     echo
     echo "  Revisa a mano estos dos mensajes (deben citar la pasarela y las IPs libres de TU red):"
-    ejecutar_script --dry-run pruebas1 "${GW%.*}.200" 2>&1 | sed 's/^/    | /'
+    ejecutar_script --dry-run pruebas1 "$IP_DHCP" 2>&1 | sed 's/^/    | /'
     echo
     ejecutar_script --dry-run --limpiar --gluster-cluster 2>&1 | sed -n '1,/^$/p' | sed 's/^/    | /'
 }

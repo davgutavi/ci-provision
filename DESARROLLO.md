@@ -32,7 +32,7 @@ fuentes, así que no se puede olvidar.
 ## Tests locales (sin libvirt)
 
 Usan [bats](https://github.com/bats-core/bats-core), incluido como submódulo,
-con un `virsh`, un `virt-install`, un `wget` y un `whiptail` simulados (`test/mocks/`) y un
+con `virsh`, `virt-install`, `wget`, `curl` y `whiptail` simulados (`test/mocks/`) y un
 `HOME` de mentira. Clona con:
 
 ```bash

@@ -895,6 +895,119 @@ qinfo() {
     assert_output --regexp "IP           : 192\\.168\\.7\\.[0-9]+ \\(DHCP\\)"
 }
 
+@test "sin wget se descarga con curl" {
+    # PATH sin el wget real: los mocks, qemu-img y jq, y solo /usr/bin y /bin
+    local bin="$BATS_TEST_TMPDIR/bin"
+    mkdir -p "$bin"
+    ln -s "$REPO_DIR/test/mocks/virsh" "$bin/virsh"
+    ln -s "$REPO_DIR/test/mocks/virt-install" "$bin/virt-install"
+    ln -s "$REPO_DIR/test/mocks/curl" "$bin/curl"
+    ln -s "$(command -v qemu-img)" "$bin/qemu-img"
+    ln -s "$(command -v jq)" "$bin/jq"
+    if PATH="$bin:/usr/bin:/bin" command -v wget >/dev/null 2>&1; then
+        skip "hay un wget en /usr/bin: no se puede aislar la rama de curl"
+    fi
+    rm "$SILO/debian12.qcow2"
+    # "$BASH": el bash con el que corre bats, no el /bin/bash del sistema (en macOS es 3.2)
+    PATH="$bin:/usr/bin:/bin" run "$BASH" "$SCRIPT" server1
+    assert_success
+    [ "$(llamadas '^curl')" -eq 1 ]
+    [ "$(qinfo "$SILO/debian12.qcow2" '.format')" = "qcow2" ]
+}
+
+@test "el agente puede tardar en devolver el resultado de cloud-init status" {
+    MOCK_EXEC_PENDIENTE=3 run bash "$SCRIPT" server1
+    assert_success
+    assert_output --partial "operativa tras"
+    refute_output --partial "se da por terminado"
+}
+
+@test "si --limpiar no consigue eliminar el dominio: error 21 con el comando" {
+    run bash "$SCRIPT" server1
+    assert_success
+    MOCK_UNDEFINE_FALLA=1 run bash "$SCRIPT" --limpiar server1 </dev/null
+    assert_failure 21
+    assert_output --partial "No se ha podido eliminar el dominio"
+    assert_output --partial "virsh undefine ${USUARIO}-server1 --snapshots-metadata"
+}
+
+@test "si no se consigue expulsar el medio de cloud-init, se avisa y se termina bien" {
+    MOCK_EJECT_NUNCA=1 run bash "$SCRIPT" server1
+    assert_success
+    assert_output --partial "no se ha podido expulsar el medio"
+    assert_output --partial "Apaga la máquina antes de tomar instantáneas"
+}
+
+@test "domifaddr con varias interfaces: se toma la IPv4 que no es loopback" {
+    MOCK_VARIAS_IFACES=1 run bash "$SCRIPT" server1
+    assert_success
+    assert_output --regexp "operativa tras [0-9]+s\\. IP: 192\\.168\\.7\\.[0-9]+"
+}
+
+@test "aviso de known_hosts cuando la IP ya figura con otra clave" {
+    echo "192.168.7.2 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOldKeyOldKeyOldKeyOldKeyOldKeyOldKeyOldKey" > "$HOME/.ssh/known_hosts"
+    run bash "$SCRIPT" server1 192.168.7.2
+    assert_success
+    assert_output --partial "ya figuran en tu known_hosts"
+    assert_output --partial "ssh-keygen -f \"$HOME/.ssh/known_hosts\" -R \"192.168.7.2\""
+}
+
+@test "red definida con prefix= en vez de netmask=, y red sin bloque IPv4 (error 43)" {
+    quitar_red "${USUARIO}-red"
+    {
+        echo "<network>"
+        echo "  <name>${USUARIO}-red</name>"
+        echo "  <ip address=\"192.168.7.1\" prefix=\"24\">"
+        echo "    <dhcp><range start=\"192.168.7.128\" end=\"192.168.7.254\"/></dhcp>"
+        echo "  </ip>"
+        echo "</network>"
+    } > "$MOCK_STATE/red-${USUARIO}-red.xml"
+    echo "${USUARIO}-red" >> "$MOCK_STATE/redes.txt"
+    run bash "$SCRIPT" --dry-run server1 192.168.7.50
+    assert_success
+    assert_output --partial "prefijo /24"
+    {
+        echo "<network>"
+        echo "  <name>${USUARIO}-red</name>"
+        echo "  <ip family='ipv6' address='fd00::1' prefix='64'/>"
+        echo "</network>"
+    } > "$MOCK_STATE/red-${USUARIO}-red.xml"
+    run bash "$SCRIPT" --dry-run server1
+    assert_failure 43
+    assert_output --partial "virsh net-dumpxml ${USUARIO}-red"
+}
+
+@test "--tam se aplica a la base y a los nodos del clúster; las opciones de acceso llegan al resumen" {
+    run bash "$SCRIPT" --gluster-cluster --tam 20G --no-root --ssh-pass Clave1 --no-virt-viewer
+    assert_success
+    [ "$(qinfo "$SILO/glusterbase.qcow2" '."virtual-size"')" -eq $(( 20 * 1024 * 1024 * 1024 )) ]
+    [ "$(qinfo "$SILO/server4.qcow2" '."virtual-size"')" -eq $(( 20 * 1024 * 1024 * 1024 )) ]
+    assert_output --partial "(o con la contraseña: Clave1)"
+    assert_output --partial "administrador, contraseña: Clave1"
+    refute_output --partial "virt-viewer --connect"
+    grep -q "administrador:Clave1" "$SILO/cloudinit-${USUARIO}-server3/cip-user.yaml"
+    ! grep -q "root:" "$SILO/cloudinit-${USUARIO}-server3/cip-user.yaml"
+}
+
+@test "nombre de máquina de más de 63 caracteres: error 20" {
+    run bash "$SCRIPT" --dry-run "$(printf 'a%.0s' {1..64})"
+    assert_failure 20
+}
+
+@test "--glusterfs a partir de otra base (--base) y clúster con --prefijo y --base" {
+    run bash "$SCRIPT" --glusterfs glusterbase
+    assert_success
+    run bash "$SCRIPT" --glusterfs --base glusterbase.qcow2 gluster2
+    assert_success
+    [ "$(qinfo "$SILO/gluster2.qcow2" '."backing-filename"')" = "glusterbase.qcow2" ]
+    run bash "$SCRIPT" --prefijo demo --gluster-cluster --base gluster2.qcow2
+    assert_success
+    assert_output --partial "Fase 1 de 2: se omite"
+    [ "$(qinfo "$SILO/demo-server1.qcow2" '."backing-filename"')" = "gluster2.qcow2" ]
+    [ ! -e "$SILO/demo-glusterbase.qcow2" ]
+    dominio_existe "demo-server4"
+}
+
 @test "--ram y --vcpus llegan a virt-install" {
     run bash "$SCRIPT" --ram 4096 --vcpus 4 server1
     assert_success

@@ -14,6 +14,10 @@
 #   MOCK_CI_RESULT=done|error  estado final de cloud-init
 #   MOCK_EXEC_UNSUPPORTED=1  qemu-agent-command falla siempre
 #   MOCK_SHUTDOWN_NUNCA=1    'virsh shutdown' nunca llega a apagar la máquina
+#   MOCK_EXEC_PENDIENTE=N    guest-exec-status responde 'exited: false' N veces antes de dar el resultado
+#   MOCK_UNDEFINE_FALLA=1    'virsh undefine' falla (p.ej. instantáneas sin --snapshots-metadata)
+#   MOCK_EJECT_NUNCA=1       'change-media --eject' nunca consigue expulsar la ISO
+#   MOCK_VARIAS_IFACES=1     domifaddr muestra además una interfaz secundaria sin IPv4
 
 S="${MOCK_STATE:?MOCK_STATE no definido}"
 mkdir -p "$S/dominios"
@@ -103,6 +107,10 @@ case "$cmd" in
 
     undefine)
         existe_dominio "$1" || { echo "error: failed to get domain '$1'" >&2; exit 1; }
+        if [[ -n "${MOCK_UNDEFINE_FALLA:-}" ]]; then
+            echo "error: Requested operation is not valid: cannot delete inactive domain with $1 snapshots" >&2
+            exit 1
+        fi
         rm -rf "$(dom_dir "$1")"
         echo "Domain '$1' has been undefined"
         exit 0 ;;
@@ -124,6 +132,9 @@ case "$cmd" in
         printf -- '-------------------------------------------------------------------------------\n'
         printf ' lo         00:00:00:00:00:00    ipv4         127.0.0.1/8\n'
         printf ' -          -                    ipv6         ::1/128\n'
+        if [[ -n "${MOCK_VARIAS_IFACES:-}" ]]; then
+            printf ' docker0    02:42:ac:11:00:01    ipv6         fe80::42:acff:fe11:1/64\n'
+        fi
         printf ' enp1s0     52:54:00:aa:bb:cc    ipv4         %s/24\n' "$ip"
         printf ' -          -                    ipv6         fe80::5054:ff:feaa:bbcc/64\n'
         exit 0 ;;
@@ -158,7 +169,9 @@ case "$cmd" in
             exit 1
         fi
         if [[ -f "$(dom_dir "$vm")/iso" ]]; then
-            rm -f "$(dom_dir "$vm")/iso"
+            if [[ -z "${MOCK_EJECT_NUNCA:-}" ]]; then
+                rm -f "$(dom_dir "$vm")/iso"
+            fi
             echo "Successfully ejected media."
             exit 0
         fi
@@ -179,6 +192,11 @@ case "$cmd" in
         json="${*: -1}"
         case "$json" in
             *guest-exec-status*)
+                p="$(contador "$vm" llamadas_status)"
+                if (( p <= ${MOCK_EXEC_PENDIENTE:-0} )); then
+                    printf '{"return":{"exited":false}}\n'
+                    exit 0
+                fi
                 n="$(contador "$vm" llamadas_exec)"
                 if (( n <= ${MOCK_CI_RUNNING:-0} )); then
                     estado="running"
