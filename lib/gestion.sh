@@ -82,11 +82,56 @@ discos_sin_maquina() {
     done
 }
 
+# Rellena con espacios hasta ANCHO caracteres. printf cuenta bytes, y con las
+# tildes (dos bytes) las columnas se desalinean.
+rellenar() {   # TEXTO ANCHO
+    local n
+    n="$(LC_ALL="$LOCALE_UTF8" wc -m <<< "$1")"
+    n=$(( n - 1 ))
+    if (( n >= $2 )); then
+        printf '%s' "$1"
+    else
+        printf '%s%*s' "$1" $(( $2 - n )) ''
+    fi
+}
+
+# "server1.qcow2 (copia de X) + N discos extra", a partir de los discos de un
+# dominio (uno por línea)
+descripcion_discos() {   # LISTA
+    local lista="$1" n principal resp desc
+    if [[ -z "$lista" ]]; then
+        echo "sin discos en el silo"
+        return 0
+    fi
+    n="$(grep -c . <<< "$lista" || true)"
+    principal="${lista%%$'\n'*}"
+    desc="$(basename "$principal")"
+    resp="$(respaldo_de "$principal")"
+    if [[ -n "$resp" ]]; then desc+=" (copia de $resp)"; fi
+    if (( n > 1 )); then desc+=" + $(( n - 1 )) discos extra"; fi
+    echo "$desc"
+}
+
+# Qué es un disco del silo que no usa ninguna máquina
+descripcion_disco_suelto() {   # FICHERO
+    local f="$1" resp dep desc=""
+    if [[ "$f" == "$BASE_IMG" ]]; then
+        echo "imagen cloud de Debian: de ella salen todas las máquinas (no la borres)"
+        return 0
+    fi
+    resp="$(respaldo_de "$f")"
+    if [[ -n "$resp" ]]; then desc="copia de $resp"; fi
+    dep="$(copias_de "$f")"
+    if [[ -n "$dep" ]]; then desc+="${desc:+; }imagen base de: $dep"; fi
+    if [[ -z "$desc" ]]; then desc="disco suelto"; fi
+    echo "$desc"
+}
+
 ########################################
 # --listar
 ########################################
 listar_maquinas() {
-    local d estado ip lista n principal resp desc f dep
+    local d estado ip f
     local -a doms=() sueltos=()
 
     while IFS= read -r d; do
@@ -103,18 +148,7 @@ listar_maquinas() {
             if [[ "$estado" == "en ejecución" ]]; then
                 ip="$(ip_dominio "$d")"
             fi
-            lista="$(discos_de_dominio "$d")"
-            if [[ -n "$lista" ]]; then
-                n="$(grep -c . <<< "$lista" || true)"
-                principal="${lista%%$'\n'*}"
-                desc="$(basename "$principal")"
-                resp="$(respaldo_de "$principal")"
-                if [[ -n "$resp" ]]; then desc+=" (copia de $resp)"; fi
-                if (( n > 1 )); then desc+=" + $(( n - 1 )) discos extra"; fi
-            else
-                desc="sin discos en el silo"
-            fi
-            printf '  %-26s %-13s %-16s %s\n' "$d" "$estado" "$ip" "$desc"
+            printf '  %s %s %s %s\n' "$(rellenar "$d" 26)" "$(rellenar "$estado" 13)" "$(rellenar "$ip" 16)" "$(descripcion_discos "$(discos_de_dominio "$d")")"
         done
     fi
 
@@ -126,17 +160,7 @@ listar_maquinas() {
         echo
         echo "Discos del silo sin máquina:"
         for f in "${sueltos[@]}"; do
-            if [[ "$f" == "$BASE_IMG" ]]; then
-                desc="imagen cloud de Debian: de ella salen todas las máquinas (no la borres)"
-            else
-                desc=""
-                resp="$(respaldo_de "$f")"
-                if [[ -n "$resp" ]]; then desc="copia de $resp"; fi
-                dep="$(copias_de "$f")"
-                if [[ -n "$dep" ]]; then desc+="${desc:+; }imagen base de: $dep"; fi
-                if [[ -z "$desc" ]]; then desc="disco suelto"; fi
-            fi
-            printf '  %-26s %s\n' "$(basename "$f")" "$desc"
+            printf '  %s %s\n' "$(rellenar "$(basename "$f")" 26)" "$(descripcion_disco_suelto "$f")"
         done
     fi
 }

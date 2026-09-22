@@ -4,12 +4,37 @@
 # los argumentos, enseña el comando equivalente y lo lanza en otro proceso.
 ########################################
 
+# Colores de los diálogos: la paleta clásica de newt (fondo azul, ventanas
+# grises). Si el usuario tiene NEWT_COLORS definida, se respeta la suya.
+PALETA_ASISTENTE='
+root=white,blue
+roottext=white,blue
+helpline=white,blue
+window=black,lightgray
+border=black,lightgray
+shadow=black,black
+title=blue,lightgray
+textbox=black,lightgray
+label=black,lightgray
+listbox=black,lightgray
+actlistbox=white,blue
+sellistbox=black,cyan
+actsellistbox=white,blue
+checkbox=black,lightgray
+actcheckbox=white,blue
+entry=black,cyan
+button=black,cyan
+actbutton=white,blue
+compactbutton=black,lightgray
+'
+
 # Ejecuta whiptail y devuelve su selección por stdout (whiptail la escribe por
 # stderr). Estado: 0 aceptar, 1 cancelar, 255 Esc. Va con locale UTF-8: con
 # LC_ALL=C (la del resto del script) whiptail corta los textos en las tildes.
 wt() {
     local out rc=0
-    out="$(LC_ALL="$LOCALE_UTF8" whiptail --title "ci-provision $VERSION" "$@" 3>&1 1>&2 2>&3)" || rc=$?
+    out="$(NEWT_COLORS="${NEWT_COLORS:-$PALETA_ASISTENTE}" LC_ALL="$LOCALE_UTF8" \
+           whiptail --title "ci-provision $VERSION" "$@" 3>&1 1>&2 2>&3)" || rc=$?
     printf '%s' "$out"
     return "$rc"
 }
@@ -39,21 +64,21 @@ salir_asistente() {
 asistente() {
     local sel
     while true; do
-        sel="$(wt --menu $'¿Qué quieres hacer?\n(muévete con las flechas y elige con Enter)' 20 76 8 \
-            basica   "Crear una máquina" \
-            server1  "Crear SERVER1 del boletín 2 (IP .2 y seis discos extra)" \
-            cluster  "Crear la infraestructura GlusterFS del boletín 2" \
+        sel="$(wt --notags --menu $'¿Qué quieres hacer?\n(muévete con las flechas y elige con Enter)' 20 78 8 \
+            basica   "Crear una máquina básica (boletín 1)" \
+            extra    "Crear una máquina con IP .2 y 6 discos extra (boletín 2, epígrafe 2.1)" \
+            cluster  "Crear la infraestructura GlusterFS (boletín 2, epígrafe 2.4)" \
             base     "Crear solo la imagen base GlusterFS" \
-            listar   "Ver lo que tengo" \
-            eliminar "Eliminar máquinas" \
-            todo     "Eliminar todas mis máquinas" \
+            listar   "Mostrar mis máquinas virtuales" \
+            eliminar "Eliminar una máquina virtual (y su almacenamiento)" \
+            todo     "Eliminar todas mis máquinas virtuales (y su almacenamiento)" \
             salir    "Salir")" || salir_asistente
         case "$sel" in
-            basica)   asistente_maquina "" ;;
-            server1)  asistente_maquina server1 ;;
+            basica)   asistente_maquina basica ;;
+            extra)    asistente_maquina extra ;;
             cluster)  asistente_cluster ;;
             base)     asistente_base ;;
-            listar)   ejecutar_asistente --directo --listar ;;
+            listar)   asistente_listar ;;
             eliminar) asistente_eliminar ;;
             todo)     ejecutar_asistente --eliminar-todo ;;
             *)        salir_asistente ;;
@@ -79,19 +104,15 @@ opciones_a_argumentos() {   # SALIDA_DEL_CHECKLIST
     return 0
 }
 
-asistente_maquina() {   # "" (nombre a elegir) o server1
-    local preset="$1" nombre ip sugerida libres texto marcado sel
+asistente_maquina() {   # basica | extra (IP .2 sugerida y discos extra marcados)
+    local modo="$1" nombre ip sugerida libres texto marcado sel
     local -a args=()
 
-    if [[ -n "$preset" ]]; then
-        nombre="$preset"
-    else
-        nombre="$(wt --inputbox $'Nombre corto de la máquina (letras, números y guiones).\nEl dominio será '"${PREFIJO_DOMINIO}"$'-NOMBRE y el disco NOMBRE.qcow2.' 11 70 server1)" || return 0
-        if [[ -z "$nombre" ]]; then return 0; fi
-    fi
+    nombre="$(wt --inputbox $'Nombre corto de la máquina (letras, números y guiones).\nEl dominio será '"${PREFIJO_DOMINIO}"$'-NOMBRE y el disco NOMBRE.qcow2.' 11 70 server1)" || return 0
+    if [[ -z "$nombre" ]]; then return 0; fi
 
     sugerida=""
-    if [[ -n "$preset" ]]; then
+    if [[ "$modo" == extra ]]; then
         sugerida="$(ip_de_la_red 2)"
     fi
     libres="$(ips_libres_texto)"
@@ -102,7 +123,7 @@ asistente_maquina() {   # "" (nombre a elegir) o server1
     ip="$(wt --inputbox "$texto" 16 70 "$sugerida")" || return 0
 
     marcado=off
-    if [[ -n "$preset" ]]; then marcado=on; fi
+    if [[ "$modo" == extra ]]; then marcado=on; fi
     sel="$(wt --checklist $'Opciones (marca con la barra espaciadora):' 16 76 5 \
         extra-disks    "Seis discos extra vdb..vdg de ${TAM_DISCO_EXTRA}" "$marcado" \
         ssh-pass       "Contraseña para administrador y SSH por contraseña" off \
@@ -149,6 +170,81 @@ asistente_base() {
     fi
     args+=( "$nombre" )
     ejecutar_asistente "${args[@]}"
+}
+
+# Lista de máquinas y discos sueltos; al elegir uno se abre su ficha
+asistente_listar() {
+    local d f sel estado ip lista n tipo
+    local -a items=()
+
+    while IFS= read -r d; do
+        if [[ -z "$d" ]]; then continue; fi
+        estado="$(estado_dominio "$d")"
+        ip="-"
+        if [[ "$estado" == "en ejecución" ]]; then ip="$(ip_dominio "$d")"; fi
+        lista="$(discos_de_dominio "$d")"
+        n=0
+        if [[ -n "$lista" ]]; then n="$(grep -c . <<< "$lista" || true)"; fi
+        items+=( "m:$d" "$(rellenar "${d#"${PREFIJO_DOMINIO}-"}" 14) $(rellenar "$estado" 12) $(rellenar "$ip" 15) $n disco(s)" )
+    done < <(dominios_propios)
+
+    while IFS= read -r f; do
+        if [[ -z "$f" ]]; then continue; fi
+        tipo="sin máquina"
+        if [[ "$f" == "$BASE_IMG" ]]; then tipo="imagen cloud"; fi
+        items+=( "d:$f" "$(rellenar "$(basename "$f")" 14) $(rellenar "$tipo" 12) $(descripcion_disco_suelto "$f")" )
+    done < <(discos_sin_maquina)
+
+    if (( ${#items[@]} == 0 )); then
+        wt --msgbox "No tienes máquinas ni discos en el silo." 8 60 || true
+        return 0
+    fi
+
+    while true; do
+        sel="$(wt --notags --menu $'Mis máquinas virtuales y los discos del silo.\nElige una entrada para ver su ficha; Cancelar para volver.' 22 78 12 "${items[@]}")" || return 0
+        case "$sel" in
+            m:*) ficha_maquina "${sel#m:}" ;;
+            d:*) ficha_disco "${sel#d:}" ;;
+        esac
+    done
+}
+
+ficha_maquina() {   # DOMINIO
+    local d="$1" estado ip lista f resp texto n=4
+    estado="$(estado_dominio "$d")"
+    ip="-"
+    if [[ "$estado" == "en ejecución" ]]; then ip="$(ip_dominio "$d")"; fi
+    texto="Máquina : $d   (hostname: ${d#"${PREFIJO_DOMINIO}-"})"$'\n'"Estado  : $estado"$'\n'"IP      : $ip"$'\n'"Discos  :"
+    lista="$(discos_de_dominio "$d")"
+    if [[ -z "$lista" ]]; then
+        texto+=" (ninguno en el silo)"
+    fi
+    while IFS= read -r f; do
+        if [[ -n "$f" ]]; then
+            resp="$(respaldo_de "$f")"
+            texto+=$'\n'"          $(basename "$f")${resp:+ (copia de $resp)}"
+            n=$(( n + 1 ))
+        fi
+    done <<< "$lista"
+    if [[ "$ip" != "-" ]]; then
+        texto+=$'\n'"Acceso  : ssh administrador@$ip"
+        n=$(( n + 1 ))
+    fi
+    texto+=$'\n'"Consola : virsh console $d"
+    texto+=$'\n\n'"Para eliminarla con sus discos: $0 --eliminar ${d#"${PREFIJO_DOMINIO}-"}"
+    n=$(( n + 3 ))
+    wt --msgbox "$texto" $(( n + 6 )) 78 || true
+}
+
+ficha_disco() {   # FICHERO
+    local f="$1" vs texto
+    vs="$(qemu-img info -U --output=json "$f" 2>/dev/null | jq -r '."virtual-size" // empty' 2>/dev/null || true)"
+    texto="Disco   : $(basename "$f")"$'\n'"Ruta    : $f"
+    if [[ "$vs" =~ ^[0-9]+$ ]]; then
+        texto+=$'\n'"Tamaño  : $(( (vs + 1073741823) / 1073741824 )) GiB (virtual)"
+    fi
+    texto+=$'\n'"Qué es  : $(descripcion_disco_suelto "$f")"
+    wt --msgbox "$texto" 11 78 || true
 }
 
 asistente_eliminar() {

@@ -758,9 +758,9 @@ qinfo() {
     [ "$(llamadas '^virt-install')" -eq 0 ]
 }
 
-@test "--menu: SERVER1 sugiere la IP .2 con los discos extra marcados; eliminar elige de la lista" {
+@test "--menu: almacenamiento extra pide el nombre, sugiere la IP .2 y marca los discos; eliminar elige de la lista" {
     export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
-    printf '%s\n' "0 server1" "0 192.168.7.2" "0 \"extra-disks\"" "0" "0 eliminar" "0 \"server1\"" "0" "1" > "$MOCK_WHIPTAIL"
+    printf '%s\n' "0 extra" "0 server1" "0 192.168.7.2" "0 \"extra-disks\"" "0" "0 eliminar" "0 \"server1\"" "0" "1" > "$MOCK_WHIPTAIL"
     run bash "$SCRIPT" --menu </dev/null
     assert_success
     grep -q -- ' 16 70 192.168.7.2$' "$MOCK_STATE/log"
@@ -770,6 +770,25 @@ qinfo() {
     grep -q -- '--checklist .* server1 en ejecución off' "$MOCK_STATE/log"
     ! dominio_existe "${USUARIO}-server1"
     [ ! -e "$SILO/server1-vdb.qcow2" ]
+}
+
+@test "--menu: la lista gráfica muestra máquinas y discos sueltos, con ficha al elegir" {
+    run bash "$SCRIPT" --extra-disks server1
+    assert_success
+    run bash "$SCRIPT" --glusterfs glusterbase
+    assert_success
+    export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
+    printf '%s\n' "0 listar" "0 m:${USUARIO}-server1" "0" "0 d:$SILO/glusterbase.qcow2" "0" "1" "1" > "$MOCK_WHIPTAIL"
+    run bash "$SCRIPT" --menu </dev/null
+    assert_success
+    grep -q -- '--notags --menu Mis máquinas virtuales' "$MOCK_STATE/log"
+    grep -qE -- "m:${USUARIO}-server1 server1 +en ejecución +192\.168\.7\.[0-9]+ +7 disco\(s\)" "$MOCK_STATE/log"
+    grep -q -- "d:$SILO/glusterbase.qcow2 glusterbase.qcow2 sin máquina  copia de debian12.qcow2" "$MOCK_STATE/log"
+    grep -q -- "Máquina : ${USUARIO}-server1   (hostname: server1)" "$MOCK_STATE/log"
+    grep -q -- "          server1-vdg.qcow2" "$MOCK_STATE/log"
+    grep -q -- "Disco   : glusterbase.qcow2" "$MOCK_STATE/log"
+    grep -q -- "Tamaño  : 40 GiB (virtual)" "$MOCK_STATE/log"
+    assert_output --partial "Sin cambios."
 }
 
 @test "--menu: la contraseña no se muestra en el comando; sin whiptail, error 38; sin más opciones" {
