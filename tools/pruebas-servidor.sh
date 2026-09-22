@@ -431,8 +431,7 @@ fase_c() {
 
     echo
     info "El clúster se conserva para que puedas inspeccionarlo. Para eliminarlo:"
-    echo "      for m in server1 server2 server3 server4; do virsh destroy ${USUARIO}-\$m; virsh undefine ${USUARIO}-\$m --snapshots-metadata; done"
-    echo "      cd $SILO && rm -f glusterbase.qcow2 server[1-4].qcow2 server[1-4]-vd?.qcow2 && rm -rf cloudinit-${USUARIO}-*"
+    echo "      $SCRIPT --eliminar server1 server2 server3 server4 glusterbase"
 }
 
 ########################################
