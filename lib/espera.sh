@@ -23,6 +23,7 @@ declare -A IP_ESPERADA=()      # dominio → IP fija que debe tener (si la hay)
 declare -A FALLOS_CONSULTA=()  # dominio → veces seguidas sin poder consultar cloud-init
 declare -A ASUMIDO_DESDE=()    # dominio → instante en que se empezó a asumir que está lista
 EXIGIR_ESTADO_CI=false         # true: no vale asumir; hace falta leer el estado de cloud-init (la base GlusterFS)
+declare -A IP_VISTA=()         # dominio → última IP que ha reportado el agente, esté lista o no
 
 limpiar_linea() {
     if [[ -t 1 ]]; then
@@ -79,6 +80,7 @@ maquina_lista() {
     if [[ -z "$ip" ]]; then
         return 1
     fi
+    IP_VISTA[$vm]="$ip"
 
     # Si se pidió IP fija, se exige esa IP concreta
     if [[ -n "${IP_ESPERADA[$vm]:-}" && "$ip" != "${IP_ESPERADA[$vm]}" ]]; then
@@ -94,7 +96,7 @@ maquina_lista() {
                 ESTADO_CI[$vm]="done"
                 return 0
                 ;;
-            error)
+            error|"degraded done")
                 IPS_DETECTADAS[$vm]="$ip"
                 ESTADO_CI[$vm]="error"
                 return 0
@@ -169,6 +171,13 @@ esperar_maquinas() {
             echo "       Puede que siga(n) instalando paquetes. Comprueba su estado con:" >&2
             for vm in "${pendientes[@]}"; do
                 echo "         virsh domifaddr $vm --source agent" >&2
+                if [[ -n "${IP_VISTA[$vm]:-}" ]]; then
+                    if [[ -n "${IP_ESPERADA[$vm]:-}" && "${IP_VISTA[$vm]}" != "${IP_ESPERADA[$vm]}" ]]; then
+                        echo "         ($vm responde en ${IP_VISTA[$vm]} y no en la IP fija ${IP_ESPERADA[$vm]}: la configuración de red no se ha aplicado)" >&2
+                    else
+                        echo "         ($vm ya responde en ${IP_VISTA[$vm]}; cloud-init sigue trabajando)" >&2
+                    fi
+                fi
             done
             echo "       Si no responde, entra por consola: virsh console NOMBRE" >&2
             return 1

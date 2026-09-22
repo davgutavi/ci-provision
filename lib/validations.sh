@@ -165,7 +165,8 @@ Para que arranque sola:  virsh net-autostart $NET_NAME"
 # con redes que sigan otra topología.
 ########################################
 load_network_info() {
-    local xml
+    local xml pista
+    pista=$'\n'"Revisa su definición con: virsh net-dumpxml $NET_NAME"$'\n'"Si no ves el problema, avisa a tu profesor con esa salida."
     if ! xml="$(virsh net-dumpxml "$NET_NAME" 2>/dev/null)"; then
         error 40 "La red '$NET_NAME' no existe.
 Consulta las redes disponibles con: virsh net-list --all"
@@ -177,7 +178,7 @@ Consulta las redes disponibles con: virsh net-list --all"
     local ipline
     ipline="$( { printf '%s\n' "$xml" | grep -E '<ip[[:space:]]' | grep -v "family='ipv6'" | head -n1; } || true )"
     if [[ -z "$ipline" ]]; then
-        error 43 "No se ha podido determinar la configuración IPv4 de la red '$NET_NAME'."
+        error 43 "No se ha podido determinar la configuración IPv4 de la red '$NET_NAME'.$pista"
     fi
 
     NET_GATEWAY="$(xml_attr "$ipline" address)"
@@ -187,16 +188,21 @@ Consulta las redes disponibles con: virsh net-list --all"
 
     if [[ -n "$NET_NETMASK" ]]; then
         if ! NET_PREFIX="$(mask_to_prefix "$NET_NETMASK")"; then
-            error 43 "La máscara '$NET_NETMASK' de la red '$NET_NAME' no es válida."
+            error 43 "La máscara '$NET_NETMASK' de la red '$NET_NAME' no es válida.$pista"
         fi
     elif [[ -n "$pfx" ]]; then
         NET_PREFIX="$pfx"
-    else
-        error 43 "La red '$NET_NAME' no declara ni máscara ni prefijo."
+    elif valid_ipv4 "$NET_GATEWAY"; then
+        # Sin máscara ni prefijo, libvirt aplica la máscara por clase
+        case "${NET_GATEWAY%%.*}" in
+            [0-9]|[1-9][0-9]|1[01][0-9]|12[0-7]) NET_PREFIX=8 ;;
+            1[2-8][0-9]|19[01])                  NET_PREFIX=16 ;;
+            *)                                    NET_PREFIX=24 ;;
+        esac
     fi
 
     if ! valid_ipv4 "$NET_GATEWAY"; then
-        error 43 "La pasarela '$NET_GATEWAY' de la red '$NET_NAME' no es una IPv4 válida."
+        error 43 "La pasarela '$NET_GATEWAY' de la red '$NET_NAME' no es una IPv4 válida.$pista"
     fi
 
     # Rangos DHCP (puede haber varios)
@@ -271,7 +277,12 @@ validar_ip_fija() {
     local ip="$1"
 
     if ! valid_ipv4 "$ip"; then
-        error 41 "La IP '$ip' no es una dirección IPv4 válida."
+        error 41 "La IP '$ip' no es una dirección IPv4 válida (cuatro números de 0 a 255 separados por puntos).
+Pasarela : ${NET_GATEWAY}
+IPs libres para asignación fija:
+$(free_ip_blocks)
+
+También puedes omitir el parámetro IP para que la máquina use DHCP."
     fi
 
     local ipi gwi neti bcasti maski
@@ -410,13 +421,22 @@ comprobar_imagen_base() {
     # Imagen indicada con --base: tiene que existir ya; no se descarga nada
     if [[ -n "$BASE_OPT" ]]; then
         if [[ ! -f "$BASE_IMG" ]]; then
-            error 39 "La imagen indicada con --base no está en el silo: $BASE_IMG"
+            error 39 "La imagen indicada con --base no está en el silo: $BASE_IMG
+Mira qué imágenes tienes con: ls $SILO_DIR/*.qcow2"
         fi
         local info_b fmt_b
         info_b="$(qemu-img info -U --output=json "$BASE_IMG" 2>/dev/null || true)"
         fmt_b="$(printf '%s' "$info_b" | jq -r '.format // empty' 2>/dev/null || true)"
         if [[ "$fmt_b" != "qcow2" ]]; then
-            error 39 "La imagen indicada con --base no es un qcow2 válido: $BASE_IMG (formato: ${fmt_b:-desconocido})."
+            error 39 "La imagen indicada con --base no es un qcow2 válido: $BASE_IMG (formato: ${fmt_b:-desconocido}).
+Mira qué imágenes tienes con: ls $SILO_DIR/*.qcow2"
+        fi
+        # Sin -U, qemu-img se niega si otra máquina tiene la imagen abierta para
+        # escribir: entonces no sirve de base (las copias saldrían corruptas)
+        if ! qemu-img info --output=json "$BASE_IMG" >/dev/null 2>&1 && qemu-img info "$BASE_IMG" 2>&1 | grep -qi 'lock'; then
+            error 39 "La imagen $BASE_IMG la tiene abierta para escribir una máquina en ejecución.
+Apágala (o elimina su dominio) antes de usarla como imagen base: las copias de un disco
+que se está escribiendo quedarían corruptas."
         fi
         return 0
     fi
@@ -470,7 +490,8 @@ validar_entorno() {
     # Silo existente
     if [[ ! -d "$SILO_DIR" ]]; then
         error 30 "No existe el silo en: $SILO_DIR
-Crea ese directorio y mapéalo como silo en el hipervisor."
+Créalo con: mkdir -p $SILO_DIR
+y mapéalo como silo en el hipervisor, como se explica en el capítulo de infraestructura virtual."
     fi
 
     # Los modos de gestión no crean nada: no necesitan clave, red ni imagen
@@ -508,6 +529,12 @@ Si no la tienes, genera una pareja de claves nueva con: ssh-keygen"
     elif [[ -n "$IP" ]]; then
         validar_ip_fija "$IP"
     fi
+
+    # Antes de la descarga, que cuesta tiempo: qué se va a crear y si choca
+    # con algo existente. Con --limpiar, la eliminación se hace después, en su sitio.
+    calcular_objetivos
+    comprobar_base_no_objetivo
+    comprobar_conflictos solo-detectar
 
     # La imagen base, en último lugar: si falta hay que descargarla, y no
     # tiene sentido hacerlo para fallar después por un dato mal escrito

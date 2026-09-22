@@ -399,7 +399,7 @@ qinfo() {
     local u="$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
     ! grep -q "root:" "$u"
     ! grep -q "chpasswd" "$u"
-    assert_output --partial "root sin contraseña"
+    assert_output --partial "nadie entra por consola"
 }
 
 @test "--no-virt-viewer: sin consola gráfica, y no se sugiere virt-viewer" {
@@ -812,6 +812,87 @@ qinfo() {
     assert_failure 10
     run bash "$SCRIPT" --menu --extra-disks
     assert_failure 10
+}
+
+@test "confirmación por teclado de --limpiar: 'n' cancela sin tocar nada; 's' elimina y sigue" {
+    run bash "$SCRIPT" server1
+    assert_success
+    run con_terminal '[s/N]' n bash "$SCRIPT" --limpiar server1
+    assert_success
+    assert_output --partial "Cancelado: no se ha eliminado nada."
+    dominio_existe "${USUARIO}-server1"
+    [ "$(llamadas '^virt-install')" -eq 1 ]
+    run con_terminal '[s/N]' s bash "$SCRIPT" --limpiar server1
+    assert_success
+    assert_output --partial "dominio ${USUARIO}-server1 eliminado"
+    [ "$(llamadas '^virt-install')" -eq 2 ]
+}
+
+@test "--ssh-pass -: la contraseña se pide por teclado; sin terminal, error 11" {
+    run con_terminal 'Contraseña' Secreta9 bash "$SCRIPT" --ssh-pass - server1
+    assert_success
+    grep -q "administrador:Secreta9" "$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
+    run bash "$SCRIPT" --ssh-pass - server2 </dev/null
+    assert_failure 11
+}
+
+@test "--tam admite minúsculas; cloud-init 'degraded done' cuenta como terminado con errores" {
+    run bash "$SCRIPT" --dry-run --tam 20g server1
+    assert_success
+    assert_output --partial "20G"
+    MOCK_CI_RESULT="degraded done" run bash "$SCRIPT" server1
+    assert_success
+    assert_output --partial "informa de errores"
+}
+
+@test "red definida sin máscara ni prefijo: se asume la de su clase" {
+    quitar_red "${USUARIO}-red"
+    {
+        echo "<network>"
+        echo "  <name>${USUARIO}-red</name>"
+        echo "  <forward mode='nat'/>"
+        echo "  <ip address='192.168.7.1'>"
+        echo "    <dhcp><range start='192.168.7.128' end='192.168.7.254'/></dhcp>"
+        echo "  </ip>"
+        echo "</network>"
+    } > "$MOCK_STATE/red-${USUARIO}-red.xml"
+    echo "${USUARIO}-red" >> "$MOCK_STATE/redes.txt"
+    run bash "$SCRIPT" --dry-run server1 192.168.7.50
+    assert_success
+    assert_output --partial "prefijo /24"
+}
+
+@test "--red con un nombre inválido: error 40; una IP mal formada enseña las IPs libres" {
+    run bash "$SCRIPT" --dry-run --red 'a,b' server1
+    assert_failure 40
+    run bash "$SCRIPT" --dry-run server1 192.168.7
+    assert_failure 41
+    assert_output --partial "IPs libres"
+}
+
+@test "un conflicto se detecta antes de descargar la imagen base" {
+    rm "$SILO/debian12.qcow2"
+    touch "$SILO/server1.qcow2"
+    run bash "$SCRIPT" server1
+    assert_failure 21
+    [ "$(llamadas '^wget')" -eq 0 ]
+}
+
+@test "si falla un nodo del clúster, se deshacen los nodos pero la base recién construida se conserva" {
+    MOCK_VIRT_INSTALL_FALLA_EN=4 run bash "$SCRIPT" --gluster-cluster
+    assert_failure
+    [ -e "$SILO/glusterbase.qcow2" ]
+    assert_output --partial "se conserva"
+    ! dominio_existe "${USUARIO}-server1"
+    [ ! -e "$SILO/server1.qcow2" ] && [ ! -e "$SILO/server3.qcow2" ]
+}
+
+@test "si cloud-init no termina pero el agente ya da la IP, el aviso y el resumen la muestran" {
+    MOCK_CI_RUNNING=999 WAIT_TIMEOUT=3 run bash "$SCRIPT" server1
+    assert_success
+    assert_output --partial "ya responde en 192.168.7."
+    refute_output --partial "consúltala con"
+    assert_output --regexp "IP           : 192\\.168\\.7\\.[0-9]+ \\(DHCP\\)"
 }
 
 @test "--ram y --vcpus llegan a virt-install" {

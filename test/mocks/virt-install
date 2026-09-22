@@ -4,6 +4,7 @@
 #
 #   MOCK_VIRT_INSTALL_FALLA=1        falla sin crear nada, como si libvirt diera error
 #   MOCK_VIRT_INSTALL_FALLA_TARDE=1  define el dominio y luego falla (error tardío o Ctrl+C)
+#   MOCK_VIRT_INSTALL_FALLA_EN=N     falla (sin crear nada) en la llamada número N
 
 S="${MOCK_STATE:?MOCK_STATE no definido}"
 mkdir -p "$S/dominios"
@@ -11,6 +12,12 @@ echo "virt-install $*" >> "$S/log"
 
 if [[ -n "${MOCK_VIRT_INSTALL_FALLA:-}" ]]; then
     echo "ERROR    error simulado de virt-install" >&2
+    exit 1
+fi
+n=$(( $(cat "$S/virt_install_n" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$S/virt_install_n"
+if [[ -n "${MOCK_VIRT_INSTALL_FALLA_EN:-}" && "$n" == "$MOCK_VIRT_INSTALL_FALLA_EN" ]]; then
+    echo "ERROR    error simulado de virt-install (llamada $n)" >&2
     exit 1
 fi
 

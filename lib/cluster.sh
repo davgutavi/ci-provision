@@ -113,18 +113,24 @@ Cuando termines, repite el comando añadiendo --limpiar, o elimínala tú:
 
     echo "→ Apagando '$vm'…"
     if ! apagar_maquina "$vm"; then
-        error 70 "La máquina '$vm' no se ha apagado en ${SHUTDOWN_TIMEOUT}s."
+        error 70 "La máquina '$vm' no se ha apagado en ${SHUTDOWN_TIMEOUT}s.
+Se deshace lo creado en esta ejecución. Comprueba la carga del servidor (virsh list --all, uptime)
+y vuelve a intentarlo. Si el dominio siguiera ahí: virsh destroy $vm; virsh undefine $vm --snapshots-metadata"
     fi
 
     # El dominio sobra: el disco se queda como respaldo de las copias
     virsh undefine "$vm" --snapshots-metadata >/dev/null
     quitar_dominio_creado "$vm"
+    # A partir de aquí la base ya vale: si falla lo siguiente, se conserva
+    quitar_disco_creado "$disco"
+    BASE_CONSERVADA="$disco"
     echo "✔ Base lista: $(basename "$disco") (el dominio '$vm' se ha eliminado; el disco se conserva)."
 }
 
 mostrar_plan_cluster() {
     local base_vm="${PREFIJO_DOMINIO}-${CLUSTER_BASE}"
-    local base_disco i host vm
+    local base_disco i host vm d comando_primero=""
+    local -a extras=()
     base_disco="$(disco_base_cluster)"
 
     echo "→ MODO SIMULACIÓN (--dry-run): no se creará nada."
@@ -165,14 +171,16 @@ mostrar_plan_cluster() {
         vm="${PREFIJO_DOMINIO}-${host}"
         generar_cloudinit "$vm" "$host" "${CLUSTER_IPS[$i]}" nodo
         echo "    $vm: disco ${PREFIJO_FICHERO}${host}.qcow2 (COW de $(basename "$base_disco")), IP ${CLUSTER_IPS[$i]}, cloud-init en $WORKDIR/"
+        if (( i == 0 )); then
+            extras=()
+            while IFS= read -r d; do extras+=( "$d" ); done < <(discos_extra_nodo "$host")
+            construir_comando "$vm" "$RAM_MB" "$VCPUS" "${SILO_DIR}/${PREFIJO_FICHERO}${host}.qcow2" "${extras[@]}"
+            comando_primero="$(imprimir_comando)"
+        fi
     done
     echo
     echo "    Comando del primer nodo (los demás son iguales, con su nombre, IP y discos):"
-    local -a extras=()
-    while IFS= read -r i; do extras+=( "$i" ); done < <(discos_extra_nodo "${CLUSTER_NODOS[0]}")
-    generar_cloudinit "${PREFIJO_DOMINIO}-${CLUSTER_NODOS[0]}" "${CLUSTER_NODOS[0]}" "${CLUSTER_IPS[0]}" nodo
-    construir_comando "${PREFIJO_DOMINIO}-${CLUSTER_NODOS[0]}" "$RAM_MB" "$VCPUS" "${SILO_DIR}/${PREFIJO_FICHERO}${CLUSTER_NODOS[0]}.qcow2" "${extras[@]}"
-    imprimir_comando | sed 's/^/    /'
+    sed 's/^/    /' <<< "$comando_primero"
     echo
     echo "No se ha creado ni modificado ninguna máquina, disco ni red."
 }
@@ -197,19 +205,9 @@ print_summary_cluster() {
     echo "GlusterFS    : glusterfs-server instalado y glusterd habilitado en todos"
     echo "/etc/hosts   : con los ${#CLUSTER_NODOS[@]} nombres, en todos"
     echo
-    echo "Acceso (igual en todos los nodos):"
-    echo "  ssh administrador@IP                  con tu clave pública"
-    if [[ -n "$SSH_PASS" ]]; then
-        echo "                                        (o con la contraseña: $SSH_PASS)"
-    fi
-    if $NO_ROOT; then
-        echo "  virsh console ${PREFIJO_DOMINIO}-server1        (root sin contraseña: --no-root)"
-    else
-        echo "  virsh console ${PREFIJO_DOMINIO}-server1        root, contraseña: $PASS_CONSOLA"
-    fi
-    if ! $NO_GRAFICOS; then
-        echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system ${PREFIJO_DOMINIO}-server1"
-    fi
+    echo "Acceso (igual en todos los nodos, con la IP de cada uno):"
+    vm="${PREFIJO_DOMINIO}-${CLUSTER_NODOS[0]}"
+    bloque_acceso "$vm" "${IPS_DETECTADAS[$vm]:-${CLUSTER_IPS[0]}}"
     echo
     echo "IMPORTANTE: no borres $base_disco."
     echo "            Los discos de los ${#CLUSTER_NODOS[@]} nodos dependen de él."
@@ -225,8 +223,6 @@ ejecutar_cluster() {
     local -a extras nodos_vm=()
     base_disco="$(disco_base_cluster)"
 
-    objetivos_cluster
-    comprobar_base_no_objetivo
     comprobar_conflictos
 
     if $DRY_RUN; then

@@ -67,3 +67,29 @@ llamadas() {
 dominio_existe() {
     [[ -d "$MOCK_STATE/dominios/$1" ]]
 }
+
+# Ejecuta un comando con una pseudoterminal y, cuando su salida contiene PATRON,
+# le escribe RESPUESTA (para probar las confirmaciones por teclado)
+con_terminal() {   # PATRON RESPUESTA COMANDO...
+    python3 - "$@" <<'PY'
+import os, pty, sys
+patron = sys.argv[1].encode(); resp = sys.argv[2].encode(); cmd = sys.argv[3:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(cmd[0], cmd)
+out = b''; pendiente = True
+while True:
+    try:
+        datos = os.read(fd, 4096)
+    except OSError:
+        break
+    if not datos:
+        break
+    out += datos
+    if pendiente and patron in out:
+        os.write(fd, resp + b'\n'); pendiente = False
+_, estado = os.waitpid(pid, 0)
+sys.stdout.write(out.decode('utf-8', 'replace'))
+sys.exit(os.WEXITSTATUS(estado) if os.WIFEXITED(estado) else 1)
+PY
+}

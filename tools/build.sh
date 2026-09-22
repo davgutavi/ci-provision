@@ -25,10 +25,13 @@ for lib in "${LIBS[@]}"; do
     echo >> "$OUT"
 done
 
-# Script principal, sin shebang, sin 'set -euo pipefail' y sin 'source ...'
-grep -vE '^#!/bin/bash|^set -euo pipefail|^source ' \
+# Script principal, sin shebang, sin 'set -euo pipefail' y sin los 'source'
+# de las librerías (solo esas líneas: las que cargan lib/*.sh)
+grep -vE '^#!/bin/bash$|^set -euo pipefail$|^source .*/lib/[a-z]+\.sh"$' \
     "$ROOT_DIR/src/main.sh" >> "$OUT"
 
+# Que al menos sea bash válido
+bash -n "$OUT"
 chmod +x "$OUT"
 
 echo "✔ Script standalone generado correctamente."

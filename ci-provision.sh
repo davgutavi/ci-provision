@@ -168,7 +168,8 @@ Para que arranque sola:  virsh net-autostart $NET_NAME"
 # con redes que sigan otra topología.
 ########################################
 load_network_info() {
-    local xml
+    local xml pista
+    pista=$'\n'"Revisa su definición con: virsh net-dumpxml $NET_NAME"$'\n'"Si no ves el problema, avisa a tu profesor con esa salida."
     if ! xml="$(virsh net-dumpxml "$NET_NAME" 2>/dev/null)"; then
         error 40 "La red '$NET_NAME' no existe.
 Consulta las redes disponibles con: virsh net-list --all"
@@ -180,7 +181,7 @@ Consulta las redes disponibles con: virsh net-list --all"
     local ipline
     ipline="$( { printf '%s\n' "$xml" | grep -E '<ip[[:space:]]' | grep -v "family='ipv6'" | head -n1; } || true )"
     if [[ -z "$ipline" ]]; then
-        error 43 "No se ha podido determinar la configuración IPv4 de la red '$NET_NAME'."
+        error 43 "No se ha podido determinar la configuración IPv4 de la red '$NET_NAME'.$pista"
     fi
 
     NET_GATEWAY="$(xml_attr "$ipline" address)"
@@ -190,16 +191,21 @@ Consulta las redes disponibles con: virsh net-list --all"
 
     if [[ -n "$NET_NETMASK" ]]; then
         if ! NET_PREFIX="$(mask_to_prefix "$NET_NETMASK")"; then
-            error 43 "La máscara '$NET_NETMASK' de la red '$NET_NAME' no es válida."
+            error 43 "La máscara '$NET_NETMASK' de la red '$NET_NAME' no es válida.$pista"
         fi
     elif [[ -n "$pfx" ]]; then
         NET_PREFIX="$pfx"
-    else
-        error 43 "La red '$NET_NAME' no declara ni máscara ni prefijo."
+    elif valid_ipv4 "$NET_GATEWAY"; then
+        # Sin máscara ni prefijo, libvirt aplica la máscara por clase
+        case "${NET_GATEWAY%%.*}" in
+            [0-9]|[1-9][0-9]|1[01][0-9]|12[0-7]) NET_PREFIX=8 ;;
+            1[2-8][0-9]|19[01])                  NET_PREFIX=16 ;;
+            *)                                    NET_PREFIX=24 ;;
+        esac
     fi
 
     if ! valid_ipv4 "$NET_GATEWAY"; then
-        error 43 "La pasarela '$NET_GATEWAY' de la red '$NET_NAME' no es una IPv4 válida."
+        error 43 "La pasarela '$NET_GATEWAY' de la red '$NET_NAME' no es una IPv4 válida.$pista"
     fi
 
     # Rangos DHCP (puede haber varios)
@@ -274,7 +280,12 @@ validar_ip_fija() {
     local ip="$1"
 
     if ! valid_ipv4 "$ip"; then
-        error 41 "La IP '$ip' no es una dirección IPv4 válida."
+        error 41 "La IP '$ip' no es una dirección IPv4 válida (cuatro números de 0 a 255 separados por puntos).
+Pasarela : ${NET_GATEWAY}
+IPs libres para asignación fija:
+$(free_ip_blocks)
+
+También puedes omitir el parámetro IP para que la máquina use DHCP."
     fi
 
     local ipi gwi neti bcasti maski
@@ -413,13 +424,22 @@ comprobar_imagen_base() {
     # Imagen indicada con --base: tiene que existir ya; no se descarga nada
     if [[ -n "$BASE_OPT" ]]; then
         if [[ ! -f "$BASE_IMG" ]]; then
-            error 39 "La imagen indicada con --base no está en el silo: $BASE_IMG"
+            error 39 "La imagen indicada con --base no está en el silo: $BASE_IMG
+Mira qué imágenes tienes con: ls $SILO_DIR/*.qcow2"
         fi
         local info_b fmt_b
         info_b="$(qemu-img info -U --output=json "$BASE_IMG" 2>/dev/null || true)"
         fmt_b="$(printf '%s' "$info_b" | jq -r '.format // empty' 2>/dev/null || true)"
         if [[ "$fmt_b" != "qcow2" ]]; then
-            error 39 "La imagen indicada con --base no es un qcow2 válido: $BASE_IMG (formato: ${fmt_b:-desconocido})."
+            error 39 "La imagen indicada con --base no es un qcow2 válido: $BASE_IMG (formato: ${fmt_b:-desconocido}).
+Mira qué imágenes tienes con: ls $SILO_DIR/*.qcow2"
+        fi
+        # Sin -U, qemu-img se niega si otra máquina tiene la imagen abierta para
+        # escribir: entonces no sirve de base (las copias saldrían corruptas)
+        if ! qemu-img info --output=json "$BASE_IMG" >/dev/null 2>&1 && qemu-img info "$BASE_IMG" 2>&1 | grep -qi 'lock'; then
+            error 39 "La imagen $BASE_IMG la tiene abierta para escribir una máquina en ejecución.
+Apágala (o elimina su dominio) antes de usarla como imagen base: las copias de un disco
+que se está escribiendo quedarían corruptas."
         fi
         return 0
     fi
@@ -473,7 +493,8 @@ validar_entorno() {
     # Silo existente
     if [[ ! -d "$SILO_DIR" ]]; then
         error 30 "No existe el silo en: $SILO_DIR
-Crea ese directorio y mapéalo como silo en el hipervisor."
+Créalo con: mkdir -p $SILO_DIR
+y mapéalo como silo en el hipervisor, como se explica en el capítulo de infraestructura virtual."
     fi
 
     # Los modos de gestión no crean nada: no necesitan clave, red ni imagen
@@ -511,6 +532,12 @@ Si no la tienes, genera una pareja de claves nueva con: ssh-keygen"
     elif [[ -n "$IP" ]]; then
         validar_ip_fija "$IP"
     fi
+
+    # Antes de la descarga, que cuesta tiempo: qué se va a crear y si choca
+    # con algo existente. Con --limpiar, la eliminación se hace después, en su sitio.
+    calcular_objetivos
+    comprobar_base_no_objetivo
+    comprobar_conflictos solo-detectar
 
     # La imagen base, en último lugar: si falta hay que descargarla, y no
     # tiene sentido hacerlo para fallar después por un dato mal escrito
@@ -602,7 +629,8 @@ copia_que_depende() {   # FICHERO
     return 1
 }
 
-comprobar_conflictos() {
+comprobar_conflictos() {   # [solo-detectar]
+    local modo="${1:-}"
     local -a dominios=() ficheros=()
     local d f
 
@@ -641,6 +669,12 @@ Elige otro nombre de máquina (o de disco, con --disco), o elimina antes esa cop
         done
     fi
 
+    # En la pasada previa a la descarga solo se avisa; con --limpiar, la
+    # eliminación se hace en la pasada definitiva
+    if [[ "$modo" == solo-detectar ]] && $LIMPIAR; then
+        return 0
+    fi
+
     if ! $LIMPIAR; then
         local msg="Ya existen elementos que este script tendría que crear:"
         for d in ${dominios[@]+"${dominios[@]}"}; do msg+=$'\n'"  dominio  $d"; done
@@ -650,6 +684,9 @@ Elige otro nombre de máquina (o de disco, con --disco), o elimina antes esa cop
         for d in ${dominios[@]+"${dominios[@]}"}; do
             msg+=$'\n'"       virsh destroy $d; virsh undefine $d --snapshots-metadata"
         done
+        if (( ${#dominios[@]} > 0 )); then
+            msg+=$'\n'"       (si la máquina ya está apagada, 'virsh destroy' dará un error; es normal)"
+        fi
         for f in ${ficheros[@]+"${ficheros[@]}"}; do
             msg+=$'\n'"       rm $f"
         done
@@ -671,6 +708,7 @@ Elige otro nombre de máquina (o de disco, con --disco), o elimina antes esa cop
     # --limpiar ya es una petición explícita y se sigue adelante.
     if ! confirmar "¿Eliminar estos elementos?"; then
         echo "Cancelado: no se ha eliminado nada."
+        echo "No se ha creado nada. Usa otro nombre de máquina (o --prefijo) para no pisar lo que ya tienes."
         SALIDA_CONTROLADA=true
         exit 0
     fi
@@ -1003,6 +1041,7 @@ declare -A IP_ESPERADA=()      # dominio → IP fija que debe tener (si la hay)
 declare -A FALLOS_CONSULTA=()  # dominio → veces seguidas sin poder consultar cloud-init
 declare -A ASUMIDO_DESDE=()    # dominio → instante en que se empezó a asumir que está lista
 EXIGIR_ESTADO_CI=false         # true: no vale asumir; hace falta leer el estado de cloud-init (la base GlusterFS)
+declare -A IP_VISTA=()         # dominio → última IP que ha reportado el agente, esté lista o no
 
 limpiar_linea() {
     if [[ -t 1 ]]; then
@@ -1059,6 +1098,7 @@ maquina_lista() {
     if [[ -z "$ip" ]]; then
         return 1
     fi
+    IP_VISTA[$vm]="$ip"
 
     # Si se pidió IP fija, se exige esa IP concreta
     if [[ -n "${IP_ESPERADA[$vm]:-}" && "$ip" != "${IP_ESPERADA[$vm]}" ]]; then
@@ -1074,7 +1114,7 @@ maquina_lista() {
                 ESTADO_CI[$vm]="done"
                 return 0
                 ;;
-            error)
+            error|"degraded done")
                 IPS_DETECTADAS[$vm]="$ip"
                 ESTADO_CI[$vm]="error"
                 return 0
@@ -1149,6 +1189,13 @@ esperar_maquinas() {
             echo "       Puede que siga(n) instalando paquetes. Comprueba su estado con:" >&2
             for vm in "${pendientes[@]}"; do
                 echo "         virsh domifaddr $vm --source agent" >&2
+                if [[ -n "${IP_VISTA[$vm]:-}" ]]; then
+                    if [[ -n "${IP_ESPERADA[$vm]:-}" && "${IP_VISTA[$vm]}" != "${IP_ESPERADA[$vm]}" ]]; then
+                        echo "         ($vm responde en ${IP_VISTA[$vm]} y no en la IP fija ${IP_ESPERADA[$vm]}: la configuración de red no se ha aplicado)" >&2
+                    else
+                        echo "         ($vm ya responde en ${IP_VISTA[$vm]}; cloud-init sigue trabajando)" >&2
+                    fi
+                fi
             done
             echo "       Si no responde, entra por consola: virsh console NOMBRE" >&2
             return 1
@@ -1295,18 +1342,24 @@ Cuando termines, repite el comando añadiendo --limpiar, o elimínala tú:
 
     echo "→ Apagando '$vm'…"
     if ! apagar_maquina "$vm"; then
-        error 70 "La máquina '$vm' no se ha apagado en ${SHUTDOWN_TIMEOUT}s."
+        error 70 "La máquina '$vm' no se ha apagado en ${SHUTDOWN_TIMEOUT}s.
+Se deshace lo creado en esta ejecución. Comprueba la carga del servidor (virsh list --all, uptime)
+y vuelve a intentarlo. Si el dominio siguiera ahí: virsh destroy $vm; virsh undefine $vm --snapshots-metadata"
     fi
 
     # El dominio sobra: el disco se queda como respaldo de las copias
     virsh undefine "$vm" --snapshots-metadata >/dev/null
     quitar_dominio_creado "$vm"
+    # A partir de aquí la base ya vale: si falla lo siguiente, se conserva
+    quitar_disco_creado "$disco"
+    BASE_CONSERVADA="$disco"
     echo "✔ Base lista: $(basename "$disco") (el dominio '$vm' se ha eliminado; el disco se conserva)."
 }
 
 mostrar_plan_cluster() {
     local base_vm="${PREFIJO_DOMINIO}-${CLUSTER_BASE}"
-    local base_disco i host vm
+    local base_disco i host vm d comando_primero=""
+    local -a extras=()
     base_disco="$(disco_base_cluster)"
 
     echo "→ MODO SIMULACIÓN (--dry-run): no se creará nada."
@@ -1347,14 +1400,16 @@ mostrar_plan_cluster() {
         vm="${PREFIJO_DOMINIO}-${host}"
         generar_cloudinit "$vm" "$host" "${CLUSTER_IPS[$i]}" nodo
         echo "    $vm: disco ${PREFIJO_FICHERO}${host}.qcow2 (COW de $(basename "$base_disco")), IP ${CLUSTER_IPS[$i]}, cloud-init en $WORKDIR/"
+        if (( i == 0 )); then
+            extras=()
+            while IFS= read -r d; do extras+=( "$d" ); done < <(discos_extra_nodo "$host")
+            construir_comando "$vm" "$RAM_MB" "$VCPUS" "${SILO_DIR}/${PREFIJO_FICHERO}${host}.qcow2" "${extras[@]}"
+            comando_primero="$(imprimir_comando)"
+        fi
     done
     echo
     echo "    Comando del primer nodo (los demás son iguales, con su nombre, IP y discos):"
-    local -a extras=()
-    while IFS= read -r i; do extras+=( "$i" ); done < <(discos_extra_nodo "${CLUSTER_NODOS[0]}")
-    generar_cloudinit "${PREFIJO_DOMINIO}-${CLUSTER_NODOS[0]}" "${CLUSTER_NODOS[0]}" "${CLUSTER_IPS[0]}" nodo
-    construir_comando "${PREFIJO_DOMINIO}-${CLUSTER_NODOS[0]}" "$RAM_MB" "$VCPUS" "${SILO_DIR}/${PREFIJO_FICHERO}${CLUSTER_NODOS[0]}.qcow2" "${extras[@]}"
-    imprimir_comando | sed 's/^/    /'
+    sed 's/^/    /' <<< "$comando_primero"
     echo
     echo "No se ha creado ni modificado ninguna máquina, disco ni red."
 }
@@ -1379,19 +1434,9 @@ print_summary_cluster() {
     echo "GlusterFS    : glusterfs-server instalado y glusterd habilitado en todos"
     echo "/etc/hosts   : con los ${#CLUSTER_NODOS[@]} nombres, en todos"
     echo
-    echo "Acceso (igual en todos los nodos):"
-    echo "  ssh administrador@IP                  con tu clave pública"
-    if [[ -n "$SSH_PASS" ]]; then
-        echo "                                        (o con la contraseña: $SSH_PASS)"
-    fi
-    if $NO_ROOT; then
-        echo "  virsh console ${PREFIJO_DOMINIO}-server1        (root sin contraseña: --no-root)"
-    else
-        echo "  virsh console ${PREFIJO_DOMINIO}-server1        root, contraseña: $PASS_CONSOLA"
-    fi
-    if ! $NO_GRAFICOS; then
-        echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system ${PREFIJO_DOMINIO}-server1"
-    fi
+    echo "Acceso (igual en todos los nodos, con la IP de cada uno):"
+    vm="${PREFIJO_DOMINIO}-${CLUSTER_NODOS[0]}"
+    bloque_acceso "$vm" "${IPS_DETECTADAS[$vm]:-${CLUSTER_IPS[0]}}"
     echo
     echo "IMPORTANTE: no borres $base_disco."
     echo "            Los discos de los ${#CLUSTER_NODOS[@]} nodos dependen de él."
@@ -1407,8 +1452,6 @@ ejecutar_cluster() {
     local -a extras nodos_vm=()
     base_disco="$(disco_base_cluster)"
 
-    objetivos_cluster
-    comprobar_base_no_objetivo
     comprobar_conflictos
 
     if $DRY_RUN; then
@@ -2296,6 +2339,7 @@ BASE_IMG_FALTA=false
 ########################################
 DOMINIOS_CREADOS=()
 DISCOS_CREADOS=()
+BASE_CONSERVADA=""       # imagen base GlusterFS ya terminada: no se deshace aunque falle lo siguiente
 CREACION_COMPLETA=false   # true cuando ya solo queda esperar: a partir de ahí no se deshace nada
 SALIDA_CONTROLADA=false   # true si se sale por un error propio (validaciones)
 INTERRUMPIDO=false        # true si el usuario pulsa Ctrl-C
@@ -2303,7 +2347,6 @@ INTERRUMPIDO=false        # true si el usuario pulsa Ctrl-C
 ########################################
 # Carga de librerías
 ########################################
-# Ajusta las rutas si tu estructura es distinta
 
 ########################################
 # Función de error con código
@@ -2348,6 +2391,10 @@ revertir_cambios() {
             echo "  - disco '$disco' eliminado" >&2
         fi
     done
+    if [[ -n "$BASE_CONSERVADA" && -e "$BASE_CONSERVADA" ]]; then
+        echo "  - la imagen base $(basename "$BASE_CONSERVADA") ya estaba terminada y se conserva:" >&2
+        echo "    puedes reutilizarla con --base $(basename "$BASE_CONSERVADA")" >&2
+    fi
 
     echo "  (nada que existiera antes de ejecutar el script se ha tocado)" >&2
 }
@@ -2438,7 +2485,8 @@ Opciones:
   --ssh-pass CONTRASEÑA
                        Da esa contraseña a 'administrador' y permite entrar por SSH
                        escribiéndola (sin --ssh-pass, por SSH solo se entra con tu
-                       clave pública). Solo caracteres ASCII.
+                       clave pública). Solo caracteres ASCII. Con '--ssh-pass -' se
+                       pide por teclado y no queda en el historial.
   --dry-run            Comprueba los datos y muestra lo que se haría, SIN crear nada
   --no-wait            No esperar a que cloud-init termine de configurar la máquina
                        (en el clúster solo afecta a los nodos: la base se espera siempre)
@@ -2555,6 +2603,19 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
     ########################################
     # Parámetros posicionales
     ########################################
+    # --ssh-pass -: la contraseña se pide por teclado, para que no quede en el
+    # historial ni la vean otros usuarios del servidor en 'ps'
+    if [[ "$SSH_PASS" == "-" ]]; then
+        if [[ ! -t 0 ]]; then
+            error 11 "Con '--ssh-pass -' la contraseña se pide por teclado, y aquí no hay terminal."
+        fi
+        read -r -s -p "Contraseña para administrador: " SSH_PASS || SSH_PASS=""
+        echo
+        if [[ -z "$SSH_PASS" ]]; then
+            error 11 "La contraseña no puede estar vacía."
+        fi
+    fi
+
     ########################################
     # Modos de gestión: --listar, --eliminar, --eliminar-todo
     ########################################
@@ -2578,7 +2639,7 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
             NOMBRES=( "${args[@]}" )
             local pref="${PREFIJO_OPT:-$USUARIO}"
             for m in "${NOMBRES[@]}"; do
-                if ! [[ "$m" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+                if ! [[ "$m" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
                     error 20 "El nombre de máquina '$m' no es válido. Solo letras, números y guiones (p.ej. server1)."
                 fi
                 if [[ "${m,,}" == "${pref,,}-"* ]]; then
@@ -2627,7 +2688,7 @@ Consulta la ayuda con -h."
 
         # De MAQUINA sale el hostname, así que solo se admiten caracteres válidos
         # en un nombre de host
-        if ! [[ "$MAQUINA" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || (( ${#MAQUINA} > 63 )); then
+        if ! [[ "$MAQUINA" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || (( ${#MAQUINA} > 63 )); then
             error 20 "El nombre de máquina '$MAQUINA' no es válido.
 Solo letras, números y guiones, empezando por letra o número (p.ej. server1, gluster-base)."
         fi
@@ -2670,8 +2731,13 @@ y la IP la reciben las copias que hagas de ${MAQUINA}.qcow2."
         error 13 "El número de vCPUs '$VCPUS' no es válido. Debe ser un número igual o mayor que 1."
     fi
 
+    TAM_DISCO="${TAM_DISCO^^}"
     if ! [[ "$TAM_DISCO" =~ ^[0-9]+[MGT]$ ]]; then
         error 15 "El tamaño de disco '$TAM_DISCO' no es válido. Indícalo como 40G, 20G, 512M..."
+    fi
+
+    if [[ -n "$RED_OPT" ]] && ! [[ "$RED_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        error 40 "El nombre de red '$RED_OPT' no es válido. Consulta tus redes con: virsh net-list --all"
     fi
 
     if [[ -n "$DISCO_OPT" ]] && ! [[ "$DISCO_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
@@ -2685,7 +2751,7 @@ y la IP la reciben las copias que hagas de ${MAQUINA}.qcow2."
         BASE_IMG="${SILO_DIR}/${BASE_OPT}"
     fi
 
-    if [[ -n "$PREFIJO_OPT" ]] && ! [[ "$PREFIJO_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+    if [[ -n "$PREFIJO_OPT" ]] && ! [[ "$PREFIJO_OPT" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
         error 20 "El prefijo '$PREFIJO_OPT' no es válido. Solo letras, números y guiones, p.ej. demo."
     fi
 
@@ -2832,11 +2898,32 @@ servidor_fqdn() {
 ########################################
 # Resumen final de una máquina suelta
 ########################################
+# Líneas de "Acceso" del resumen, iguales para una máquina suelta y para el clúster
+bloque_acceso() {   # DOMINIO IP_PARA_SSH
+    local vm="$1" ip="$2"
+    printf '  %-42s %s\n' "ssh administrador@$ip" "con tu clave pública"
+    if [[ -n "$SSH_PASS" ]]; then
+        printf '  %-42s %s\n' "" "(o con la contraseña: $SSH_PASS)"
+    fi
+    if $NO_ROOT && [[ -z "$SSH_PASS" ]]; then
+        printf '  %-42s %s\n' "virsh console $vm" "(con --no-root y sin --ssh-pass nadie entra por consola: usa SSH)"
+    elif $NO_ROOT; then
+        printf '  %-42s %s\n' "virsh console $vm" "administrador, contraseña: $SSH_PASS"
+    else
+        printf '  %-42s %s\n' "virsh console $vm" "root, contraseña: $PASS_CONSOLA"
+    fi
+    if ! $NO_GRAFICOS; then
+        echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system $vm"
+    fi
+}
+
 print_summary() {
-    local vm_ip="${IPS_DETECTADAS[$VM_NAME]:-}"
+    local vm_ip="${IPS_DETECTADAS[$VM_NAME]:-${IP_VISTA[$VM_NAME]:-}}"
     local ip_mostrar
 
-    if [[ -n "$IP" ]]; then
+    if [[ -n "$IP" && -n "$vm_ip" && "$vm_ip" != "$IP" ]]; then
+        ip_mostrar="$IP (fija)  AVISO: la máquina ha respondido en $vm_ip; la configuración de red no se ha aplicado"
+    elif [[ -n "$IP" ]]; then
         ip_mostrar="$IP (fija)"
     elif [[ -n "$vm_ip" ]]; then
         ip_mostrar="$vm_ip (DHCP)"
@@ -2865,18 +2952,7 @@ print_summary() {
 
     echo
     echo "Acceso:"
-    echo "  ssh administrador@${IP:-${vm_ip:-IP}}        con tu clave pública"
-    if [[ -n "$SSH_PASS" ]]; then
-        echo "                                        (o con la contraseña: $SSH_PASS)"
-    fi
-    if $NO_ROOT; then
-        echo "  virsh console $VM_NAME        (root sin contraseña: --no-root)"
-    else
-        echo "  virsh console $VM_NAME        root, contraseña: $PASS_CONSOLA"
-    fi
-    if ! $NO_GRAFICOS; then
-        echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system $VM_NAME"
-    fi
+    bloque_acceso "$VM_NAME" "${vm_ip:-${IP:-IP}}"
     echo
     echo "Para eliminarla con sus discos:  $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--eliminar $MAQUINA"
     echo "-------------------------------------------"
@@ -2895,8 +2971,11 @@ print_summary_base() {
     echo "               y machine-id vacío"
     echo "Dominio      : $VM_NAME se ha eliminado; solo queda el disco"
     echo
-    echo "Úsalo como respaldo de las copias COW de tus nodos, por ejemplo:"
-    echo "  qemu-img create -f qcow2 -b $(basename "$DISCO_MAIN") -F qcow2 server1.qcow2 40G"
+    echo "Úsalo como respaldo de las copias COW de tus nodos. Con el script:"
+    echo "  $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--gluster-cluster --base $(basename "$DISCO_MAIN")"
+    echo "  $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--extra-disks --base $(basename "$DISCO_MAIN") server1 192.168.XXX.10"
+    echo "O a mano, desde el silo:"
+    echo "  cd $SILO_DIR && qemu-img create -f qcow2 -b $(basename "$DISCO_MAIN") -F qcow2 server1.qcow2 $TAM_DISCO"
     echo
     echo "IMPORTANTE: no borres ni modifiques $(basename "$DISCO_MAIN") mientras existan copias de él."
     if [[ -z "$DISCO_OPT" ]]; then
@@ -2908,35 +2987,45 @@ print_summary_base() {
 ########################################
 # Una máquina suelta
 ########################################
-ejecutar_maquina() {
-    local modo="normal"
-    local -a extras=()
+# Qué va a crear esta ejecución (dominios y ficheros). Se calcula antes de la
+# validación que cuesta tiempo (la descarga de la imagen), para avisar de un
+# conflicto cuanto antes.
+EXTRAS=()
+calcular_objetivos() {
     local unidad disco
-
-    if $GLUSTERFS; then
-        modo="gluster"
+    if $CLUSTER; then
+        objetivos_cluster
+        return 0
     fi
-
+    EXTRAS=()
     if $EXTRA_DISKS; then
         for unidad in "${UNIDADES_EXTRA[@]}"; do
-            extras+=( "${SILO_DIR}/${PREFIJO_FICHERO}${MAQUINA}-${unidad}.qcow2" )
+            EXTRAS+=( "${SILO_DIR}/${PREFIJO_FICHERO}${MAQUINA}-${unidad}.qcow2" )
         done
-        for disco in "${extras[@]}"; do
+        for disco in "${EXTRAS[@]}"; do
             if [[ "$disco" == "$DISCO_MAIN" ]]; then
                 error 16 "El nombre de disco '$(basename "$DISCO_MAIN")' coincide con uno de los discos extra que se crearían.
 Elige otro nombre para el disco principal."
             fi
         done
     fi
+    OBJ_DOMINIOS=( "$VM_NAME" )
+    OBJ_FICHEROS=( "$DISCO_MAIN" ${EXTRAS[@]+"${EXTRAS[@]}"} )
+}
+
+ejecutar_maquina() {
+    local modo="normal"
+    local disco
+
+    if $GLUSTERFS; then
+        modo="gluster"
+    fi
 
     # Conflictos con lo que ya exista (y --limpiar, si se pidió)
-    OBJ_DOMINIOS=( "$VM_NAME" )
-    OBJ_FICHEROS=( "$DISCO_MAIN" ${extras[@]+"${extras[@]}"} )
-    comprobar_base_no_objetivo
     comprobar_conflictos
 
     generar_cloudinit "$VM_NAME" "$HOST_NAME" "$IP" "$modo"
-    construir_comando "$VM_NAME" "$RAM_MB" "$VCPUS" "$DISCO_MAIN" ${extras[@]+"${extras[@]}"}
+    construir_comando "$VM_NAME" "$RAM_MB" "$VCPUS" "$DISCO_MAIN" ${EXTRAS[@]+"${EXTRAS[@]}"}
 
     ########################################
     # Modo simulación: nada de lo de abajo se ejecuta
@@ -2946,19 +3035,24 @@ Elige otro nombre para el disco principal."
         echo
         echo "✔ Validaciones superadas."
         echo "    Usuario : $USUARIO"
+        if [[ -n "$PREFIJO_OPT" ]]; then
+            echo "    Prefijo : $PREFIJO_OPT (sustituye al usuario en los dominios y en los discos)"
+        fi
+        echo "    Máquina : $VM_NAME  (hostname: $HOST_NAME)"
         echo "    Red     : $NET_NAME (pasarela $NET_GATEWAY, prefijo /$NET_PREFIX)"
         if [[ -n "$IP" ]]; then
             echo "    IP      : $IP, disponible para asignación fija"
         else
             echo "    IP      : por DHCP"
         fi
+        echo "    Recursos: ${RAM_MB} MB y ${VCPUS} vCPU"
         avisar_imagen_falta
         echo
         echo "✔ Ficheros cloud-init generados en $WORKDIR/"
         echo
         echo "Discos que se crearían en $SILO_DIR:"
         echo "    $(basename "$DISCO_MAIN")  (copia COW de $(basename "$BASE_IMG"), $TAM_DISCO)"
-        for disco in ${extras[@]+"${extras[@]}"}; do
+        for disco in ${EXTRAS[@]+"${EXTRAS[@]}"}; do
             echo "    $(basename "$disco")  ($TAM_DISCO_EXTRA)"
         done
         echo
@@ -2986,7 +3080,7 @@ Elige otro nombre para el disco principal."
     echo "→ Creando el disco $(basename "$DISCO_MAIN") (copia COW de $(basename "$BASE_IMG"), $TAM_DISCO)…"
     crear_disco_cow "$DISCO_MAIN" "$BASE_IMG" "$TAM_DISCO"
 
-    for disco in ${extras[@]+"${extras[@]}"}; do
+    for disco in ${EXTRAS[@]+"${EXTRAS[@]}"}; do
         echo "→ Creando el disco extra $(basename "$disco") ($TAM_DISCO_EXTRA)…"
         crear_disco_vacio "$disco" "$TAM_DISCO_EXTRA"
     done

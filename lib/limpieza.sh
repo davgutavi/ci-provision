@@ -82,7 +82,8 @@ copia_que_depende() {   # FICHERO
     return 1
 }
 
-comprobar_conflictos() {
+comprobar_conflictos() {   # [solo-detectar]
+    local modo="${1:-}"
     local -a dominios=() ficheros=()
     local d f
 
@@ -121,6 +122,12 @@ Elige otro nombre de máquina (o de disco, con --disco), o elimina antes esa cop
         done
     fi
 
+    # En la pasada previa a la descarga solo se avisa; con --limpiar, la
+    # eliminación se hace en la pasada definitiva
+    if [[ "$modo" == solo-detectar ]] && $LIMPIAR; then
+        return 0
+    fi
+
     if ! $LIMPIAR; then
         local msg="Ya existen elementos que este script tendría que crear:"
         for d in ${dominios[@]+"${dominios[@]}"}; do msg+=$'\n'"  dominio  $d"; done
@@ -130,6 +137,9 @@ Elige otro nombre de máquina (o de disco, con --disco), o elimina antes esa cop
         for d in ${dominios[@]+"${dominios[@]}"}; do
             msg+=$'\n'"       virsh destroy $d; virsh undefine $d --snapshots-metadata"
         done
+        if (( ${#dominios[@]} > 0 )); then
+            msg+=$'\n'"       (si la máquina ya está apagada, 'virsh destroy' dará un error; es normal)"
+        fi
         for f in ${ficheros[@]+"${ficheros[@]}"}; do
             msg+=$'\n'"       rm $f"
         done
@@ -151,6 +161,7 @@ Elige otro nombre de máquina (o de disco, con --disco), o elimina antes esa cop
     # --limpiar ya es una petición explícita y se sigue adelante.
     if ! confirmar "¿Eliminar estos elementos?"; then
         echo "Cancelado: no se ha eliminado nada."
+        echo "No se ha creado nada. Usa otro nombre de máquina (o --prefijo) para no pisar lo que ya tienes."
         SALIDA_CONTROLADA=true
         exit 0
     fi

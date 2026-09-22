@@ -168,7 +168,7 @@ De `MAQUINA` (por ejemplo `server1`) salen el nombre del dominio en libvirt
 | `--glusterfs` | Construye una imagen base GlusterFS y deja solo el disco. Ver [solo la imagen base](#caso-imagen-base) |
 | `--gluster-cluster` | Construye la infraestructura completa del boletín 2, epígrafe 2.4. Ver [infraestructura GlusterFS](#caso-cluster) |
 | `--base FICHERO` | Imagen del silo de la que hacer la copia, en lugar de `debian12.qcow2`. Con `--gluster-cluster`, los nodos parten de ella y no se construye la base. Ver [si ya tienes tu imagen base](#caso-base-propia) |
-| `--ssh-pass CONTRASEÑA` | Da esa contraseña a `administrador` y permite entrar por SSH escribiéndola. La eliges tú; solo caracteres ASCII |
+| `--ssh-pass CONTRASEÑA` | Da esa contraseña a `administrador` y permite entrar por SSH escribiéndola. La eliges tú; solo caracteres ASCII. Con `--ssh-pass -` te la pide por teclado, sin que quede en el historial |
 | `--no-root` | No habilita al usuario `root` |
 | `--no-virt-viewer` | No habilita la consola gráfica. La consola de texto (`virsh console`) sigue funcionando |
 | `--limpiar` | Si ya existen los dominios o discos que el script va a crear, los elimina antes, previa confirmación. **Solo esos** |
@@ -449,7 +449,7 @@ esos directorios los puedes borrar cuando quieras.
 | **37** | No se ha podido descargar la imagen base, o la que hay está corrupta | El mensaje indica el `wget` manual, o el `rm` para que el script la vuelva a descargar |
 | **38** | Faltan herramientas (incluido `wget`/`curl` para descargar la imagen, o `whiptail` para `--menu`) o no hay conexión con libvirt | Avisar al profesor |
 | **39** | La imagen indicada con `--base` no existe o no es un `qcow2` | Revisa el nombre; debe estar en el silo |
-| **40** | No se encuentra tu red virtual | Créala con el nombre `TU_USUARIO-red`, o usa `--red` |
+| **40** | No se encuentra tu red virtual, o el nombre dado a `--red` no es válido | Créala con el nombre `TU_USUARIO-red`, o usa `--red` |
 | **41** | IP no válida o fuera de tu red | El mensaje indica las IPs libres de tu red |
 | **42** | IP ocupada por DHCP o reservada | El mensaje indica las IPs libres de tu red |
 | **43** | No se puede interpretar la red | Revisar `virsh net-dumpxml TU_RED` |
