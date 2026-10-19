@@ -4,9 +4,18 @@
 # El script siempre crea dominios y discos nuevos. Si alguno de los que va a
 # crear ya existe, se detiene y lo dice; con --limpiar los elimina antes, pero
 # solo exactamente esos: nunca otro dominio ni otro fichero del silo.
+#
+# Aquí están también las comprobaciones que comparten --limpiar, --eliminar y
+# --eliminar-todo para no borrar nunca lo que no se debe:
+#   - un disco que use cualquier máquina del servidor que no se vaya a eliminar;
+#   - una imagen de la que dependa (directa o indirectamente) una copia que se
+#     conserva;
+#   - las imágenes cloud de partida;
+#   - un dominio cuyos discos no están en el silo (no lo ha creado el alumno
+#     con este script, aunque su nombre lo parezca: p.ej. con --prefijo).
 ########################################
 
-# Los rellena quien llama: qué dominios y qué ficheros va a crear
+# Los rellena quien llama: qué dominios y qué ficheros va a crear (o eliminar)
 OBJ_DOMINIOS=()
 OBJ_FICHEROS=()
 
@@ -20,10 +29,19 @@ en_lista() {   # VALOR [ELEMENTO...]
     return 1
 }
 
-# Pregunta sí/no por teclado. Sin terminal (uso desde otro script) la opción
-# ya es una petición explícita y se sigue adelante.
+# Pregunta sí/no por teclado. Con --si se da por contestada que sí. Sin
+# terminal y sin --si no se puede preguntar, y eliminar sin confirmación sería
+# peligroso (p.ej. desde un ssh sin sesión): se detiene con el error 23.
 confirmar() {   # PREGUNTA
-    if [[ ! -t 0 ]]; then return 0; fi
+    if $SI; then
+        echo "$1 [s/N] s   (--si)"
+        return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        error 23 "Hace falta confirmar («$1») y no hay terminal para preguntarte.
+No se ha eliminado nada. Si de verdad quieres hacerlo sin preguntas (p.ej. desde
+otro script), repite el comando añadiendo --si."
+    fi
     local respuesta
     read -r -p "$1 [s/N] " respuesta || { respuesta=""; echo; }
     case "$respuesta" in
@@ -32,22 +50,22 @@ confirmar() {   # PREGUNTA
     esac
 }
 
-# Dominios "vecinos": los que NO son objetivo de esta ejecución y podrían
-# estar usando ficheros de este silo. Por defecto, los del usuario (o del
-# prefijo); con 'todos', todos los del servidor. De cada uno se anotan sus
-# discos, para saber quién usa cada fichero.
-DOMINIOS_VECINOS=()
+########################################
+# Quién usa cada disco
+########################################
+
+# Dominios "vecinos": TODOS los del servidor que no son objetivo de esta
+# ejecución. Cualquiera de ellos podría estar usando un fichero de este silo
+# (una máquina hecha a mano con otro nombre, otro prefijo, otro usuario...).
+# De cada uno se anotan sus discos, para saber quién usa cada fichero.
 declare -A DISCO_USADO_POR=()   # fichero → dominio vecino que lo usa
-cargar_dominios_vecinos() {   # [todos]
-    local lista d f salida todos="${1:-}" pref1="${USUARIO,,}" pref2="${PREFIJO_DOMINIO,,}"
-    DOMINIOS_VECINOS=()
+cargar_dominios_vecinos() {
+    local lista d f salida
     DISCO_USADO_POR=()
     lista="$(virsh list --all --name 2>/dev/null || true)"
     while IFS= read -r d; do
         if [[ -z "$d" ]]; then continue; fi
-        if [[ -z "$todos" && "${d,,}" != "$pref1"* && "${d,,}" != "$pref2"* ]]; then continue; fi
         if en_lista "$d" ${OBJ_DOMINIOS[@]+"${OBJ_DOMINIOS[@]}"}; then continue; fi
-        DOMINIOS_VECINOS+=( "$d" )
         salida="$(virsh domblklist "$d" --inactive 2>/dev/null || true)"
         while IFS= read -r f; do
             if [[ -n "$f" && -z "${DISCO_USADO_POR[$f]:-}" ]]; then
@@ -64,24 +82,113 @@ dominio_que_usa_disco() {   # FICHERO
     echo "$d"
 }
 
-# ¿Es este fichero el respaldo (imagen base) de otro qcow2 del silo que se
-# conserva? Devuelve ese otro fichero por stdout.
-copia_que_depende() {   # FICHERO
-    local f="$1" o b x
-    for o in "$SILO_DIR"/*.qcow2; do
-        [[ -f "$o" && "$o" != "$f" ]] || continue
-        for x in ${OBJ_FICHEROS[@]+"${OBJ_FICHEROS[@]}"}; do
-            [[ "$x" == "$o" ]] && continue 2
-        done
-        b="$(qemu-img info -U --output=json "$o" 2>/dev/null | jq -r '."backing-filename" // empty' 2>/dev/null || true)"
-        if [[ -n "$b" && "$(basename "$b")" == "$(basename "$f")" ]]; then
-            echo "$o"
-            return 0
-        fi
-    done
-    return 1
+# ¿Es el dominio de este silo? Todos sus discos tienen que estar en el silo
+# (salvo el CD-ROM de cloud-init que deja virt-install), y al menos uno. Un
+# dominio con discos en otro sitio no lo ha creado el script para este alumno,
+# aunque se llame como si lo fuera.
+dominio_en_silo() {   # DOMINIO
+    local salida f n=0
+    salida="$(virsh domblklist "$1" --inactive 2>/dev/null || true)"
+    while IFS= read -r f; do
+        case "$f" in
+            "$SILO_DIR"/*)  n=$(( n + 1 )) ;;
+            *cloudinit.iso) ;;
+            *)              return 1 ;;
+        esac
+    done < <(awk 'NR > 2 && NF >= 2 && $2 != "-" { print $2 }' <<< "$salida")
+    (( n > 0 ))
 }
 
+########################################
+# Quién depende de cada imagen
+#
+# Se lee una sola vez la imagen base de cada qcow2 del silo (con un qemu-img
+# por fichero), y todo lo demás se calcula sobre ese mapa.
+########################################
+declare -A RESPALDO=()     # fichero del silo → ruta de su imagen base
+RESPALDOS_CARGADOS=false
+
+cargar_respaldos() {
+    if $RESPALDOS_CARGADOS; then return 0; fi
+    local f
+    for f in "$SILO_DIR"/*.qcow2 "$SILO_DIR"/*.img; do
+        [[ -f "$f" ]] || continue
+        RESPALDO[$f]="$(leer_respaldo "$f")"
+    done
+    RESPALDOS_CARGADOS=true
+}
+
+# Imagen base de un fichero (ruta completa), o nada. Las rutas relativas son
+# relativas al directorio del propio fichero, como las interpreta qemu.
+leer_respaldo() {   # FICHERO
+    local b
+    b="$(qemu-img info -U --output=json "$1" 2>/dev/null | jq -r '."backing-filename" // empty' 2>/dev/null || true)"
+    if [[ -z "$b" ]]; then return 0; fi
+    if [[ "$b" != /* ]]; then
+        b="$(dirname "$1")/$b"
+    fi
+    printf '%s' "$b"
+}
+
+# Copias del silo cuya imagen base es este fichero, una por línea
+copias_directas() {   # FICHERO
+    local c
+    cargar_respaldos
+    for c in "${!RESPALDO[@]}"; do
+        if [[ "${RESPALDO[$c]}" == "$1" ]]; then echo "$c"; fi
+    done
+}
+
+# Decide cuáles de estos ficheros se pueden eliminar. Se conservan:
+#   - las imágenes cloud de partida;
+#   - los que use una máquina que no se va a eliminar;
+#   - aquellos de los que dependa una copia que se conserva, aunque sea a
+#     través de otra (si una copia se queda, se queda toda su cadena).
+# Deja el resultado en BORRABLES y en CONSERVADOS ("nombre: motivo").
+# Antes hay que llamar a cargar_dominios_vecinos.
+BORRABLES=()
+CONSERVADOS=()
+filtrar_borrables() {   # FICHERO...
+    local -A cand=()
+    local f c otro cambio=true
+    BORRABLES=()
+    CONSERVADOS=()
+    cargar_respaldos
+
+    for f in "$@"; do
+        if imagen_protegida "$f"; then
+            CONSERVADOS+=( "$(basename "$f"): es una imagen cloud de partida (nunca se borra)" )
+        elif otro="$(dominio_que_usa_disco "$f")"; then
+            CONSERVADOS+=( "$(basename "$f"): lo usa la máquina '$otro'" )
+        else
+            cand[$f]=1
+        fi
+    done
+
+    # Lo que se conserva por depender de ello una copia que se queda. Se repite
+    # hasta que no cambia nada, para recorrer cadenas de cualquier longitud.
+    while $cambio; do
+        cambio=false
+        for f in "${!cand[@]}"; do
+            for c in "${!RESPALDO[@]}"; do
+                if [[ "${RESPALDO[$c]}" == "$f" && -z "${cand[$c]:-}" ]]; then
+                    unset 'cand[$f]'
+                    CONSERVADOS+=( "$(basename "$f"): es la imagen base de $(basename "$c"), que se conserva" )
+                    cambio=true
+                    break
+                fi
+            done
+        done
+    done
+
+    for f in "$@"; do
+        if [[ -n "${cand[$f]:-}" ]]; then BORRABLES+=( "$f" ); fi
+    done
+}
+
+########################################
+# Conflictos con lo que el script va a crear
+########################################
 comprobar_conflictos() {   # [solo-detectar]
     local modo="${1:-}"
     local -a dominios=() ficheros=()
@@ -89,6 +196,14 @@ comprobar_conflictos() {   # [solo-detectar]
 
     for d in ${OBJ_DOMINIOS[@]+"${OBJ_DOMINIOS[@]}"}; do
         if virsh dominfo "$d" >/dev/null 2>&1; then
+            # Un dominio que se llama como los que crea el script pero tiene
+            # sus discos fuera del silo es de otra persona (o hecho a mano):
+            # ni se elimina ni se aconseja eliminarlo
+            if ! dominio_en_silo "$d"; then
+                error 21 "Ya existe una máquina llamada '$d', pero sus discos no están en tu silo:
+no la ha creado este script para ti (puede ser de otro usuario del servidor), así que no se toca.
+Elige otro nombre de máquina, u otro --prefijo."
+            fi
             dominios+=( "$d" )
         fi
     done
@@ -104,22 +219,18 @@ comprobar_conflictos() {   # [solo-detectar]
     fi
 
     # Un fichero que ya existe puede ser el disco de otra máquina (hecha a mano
-    # con otro nombre) o el respaldo de otras copias. Entonces ni se elimina
-    # ni se aconseja eliminarlo.
+    # con otro nombre, o de otro prefijo) o el respaldo de otras copias.
+    # Entonces ni se elimina ni se aconseja eliminarlo.
     if (( ${#ficheros[@]} > 0 )); then
-        local otro
+        local msg x
         cargar_dominios_vecinos
-        for f in "${ficheros[@]}"; do
-            if otro="$(dominio_que_usa_disco "$f")"; then
-                error 21 "El disco $f ya existe y lo usa la máquina '$otro', que este script no va a crear ni a eliminar.
-Elige otro nombre de máquina (o de disco, con --disco). Si lo que quieres es deshacerte de '$otro':
-  virsh destroy $otro; virsh undefine $otro --snapshots-metadata; rm $f"
-            fi
-            if otro="$(copia_que_depende "$f")"; then
-                error 21 "El disco $f ya existe y es la imagen base de $(basename "$otro"), que dejaría de arrancar sin él.
-Elige otro nombre de máquina (o de disco, con --disco), o elimina antes esa copia."
-            fi
-        done
+        filtrar_borrables "${ficheros[@]}"
+        if (( ${#CONSERVADOS[@]} > 0 )); then
+            msg="Algunos de los discos que este script tendría que crear ya existen y no se pueden eliminar:"
+            for x in "${CONSERVADOS[@]}"; do msg+=$'\n'"  $x"; done
+            msg+=$'\n'"Elige otro nombre de máquina (o de disco, con --disco), u otro --prefijo."
+            error 21 "$msg"
+        fi
     fi
 
     # En la pasada previa a la descarga solo se avisa; con --limpiar, la
@@ -132,7 +243,7 @@ Elige otro nombre de máquina (o de disco, con --disco), o elimina antes esa cop
         local msg="Ya existen elementos que este script tendría que crear:"
         for d in ${dominios[@]+"${dominios[@]}"}; do msg+=$'\n'"  dominio  $d"; done
         for f in ${ficheros[@]+"${ficheros[@]}"}; do msg+=$'\n'"  disco    $f"; done
-        msg+=$'\n\n'"El script siempre crea máquinas y discos nuevos. Tienes dos opciones:"
+        msg+=$'\n\n'"El script siempre crea máquinas y discos nuevos. Tienes estas opciones:"
         msg+=$'\n'"  a) Eliminarlos tú:"
         for d in ${dominios[@]+"${dominios[@]}"}; do
             msg+=$'\n'"       virsh destroy $d; virsh undefine $d --snapshots-metadata"
@@ -144,6 +255,11 @@ Elige otro nombre de máquina (o de disco, con --disco), o elimina antes esa cop
             msg+=$'\n'"       rm $f"
         done
         msg+=$'\n'"  b) Repetir el comando añadiendo --limpiar, que elimina exactamente eso y nada más."
+        if $CLUSTER && [[ -z "$BASE_OPT" ]] && en_lista "$(disco_base_cluster)" ${ficheros[@]+"${ficheros[@]}"}; then
+            msg+=$'\n'"  c) Reutilizar la imagen base que ya tienes, sin volver a construirla:"
+            msg+=$'\n'"       $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--gluster-cluster --base $(basename "$(disco_base_cluster)")"
+            msg+=$'\n'"     (añade --limpiar si además existen los nodos)"
+        fi
         error 21 "$msg"
     fi
 
@@ -157,8 +273,6 @@ Elige otro nombre de máquina (o de disco, con --disco), o elimina antes esa cop
         return 0
     fi
 
-    # Confirmación por teclado. Si no hay terminal (uso desde otro script),
-    # --limpiar ya es una petición explícita y se sigue adelante.
     if ! confirmar "¿Eliminar estos elementos?"; then
         echo "Cancelado: no se ha eliminado nada."
         echo "No se ha creado nada. Usa otro nombre de máquina (o --prefijo) para no pisar lo que ya tienes."

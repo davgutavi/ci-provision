@@ -65,7 +65,7 @@ asistente() {
     local sel
     while true; do
         sel="$(wt --notags --menu $'¿Qué quieres hacer?\n(muévete con las flechas y elige con Enter)' 20 78 8 \
-            basica   "Crear una máquina básica (boletín 1)" \
+            basica   "Crear una máquina básica (boletín 1; Debian 12 propuesta)" \
             extra    "Crear una máquina con IP .2 y 6 discos extra (boletín 2, epígrafe 2.1)" \
             cluster  "Crear la infraestructura GlusterFS (boletín 2, epígrafe 2.4)" \
             base     "Crear solo la imagen base GlusterFS" \
@@ -87,16 +87,21 @@ asistente() {
 }
 
 # Opciones marcadas en un checklist → argumentos (la contraseña se pide aparte).
-# Deja el resultado en OPCIONES_ARGS; devuelve 1 si se cancela.
+# Deja el resultado en OPCIONES_ARGS; devuelve 1 si se cancela. La contraseña
+# no va en los argumentos (cualquier usuario del servidor la vería con 'ps'):
+# se guarda en PASS_ASISTENTE y la orden lleva '--ssh-pass -'.
 OPCIONES_ARGS=()
+PASS_ASISTENTE=""
 opciones_a_argumentos() {   # SALIDA_DEL_CHECKLIST
     local o pass
     OPCIONES_ARGS=()
+    PASS_ASISTENTE=""
     for o in $(etiquetas "$1"); do
         if [[ "$o" == ssh-pass ]]; then
             pass="$(wt --passwordbox $'Contraseña para administrador\n(solo letras sin tilde, números y signos básicos):' 10 70)" || return 1
             if [[ -z "$pass" ]]; then return 1; fi
-            OPCIONES_ARGS+=( --ssh-pass "$pass" )
+            PASS_ASISTENTE="$pass"
+            OPCIONES_ARGS+=( --ssh-pass - )
         elif [[ "$o" == discos-crea-entorno ]]; then
             OPCIONES_ARGS+=( --discos-nodo "${#UNIDADES_POSIBLES_NODO[@]}" )
         else
@@ -138,12 +143,24 @@ elegir_imagen_gluster() {
     fi
 }
 
+# Nombre corto válido para el asistente: si no lo es, lo dice y devuelve 1
+# (un nombre que empezara por '-' se tomaría además por una opción)
+nombre_valido_asistente() {   # NOMBRE
+    if [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] && (( ${#1} <= 63 )); then
+        return 0
+    fi
+    wt --msgbox "El nombre '$1' no es válido: solo letras, números y guiones, empezando
+por letra o número (p.ej. server1)." 9 72 || true
+    return 1
+}
+
 asistente_maquina() {   # basica | extra (IP .2 sugerida y discos extra marcados)
     local modo="$1" nombre ip sugerida libres texto marcado sel
     local -a args=()
 
     nombre="$(wt --inputbox $'Nombre corto de la máquina (letras, números y guiones).\nEl dominio será '"${PREFIJO_DOMINIO}"$'-NOMBRE y el disco NOMBRE.qcow2.' 11 70 server1)" || return 0
     if [[ -z "$nombre" ]]; then return 0; fi
+    nombre_valido_asistente "$nombre" || return 0
 
     sugerida=""
     if [[ "$modo" == extra ]]; then
@@ -182,7 +199,7 @@ asistente_cluster() {
     local base sel usar_base=false
     local -a args=( --gluster-cluster )
 
-    base="${SILO_DIR}/${PREFIJO_FICHERO}${CLUSTER_BASE}.qcow2"
+    base="$(disco_base_cluster)"
     if [[ -f "$base" ]]; then
         if wt --yesno "Ya tienes $(basename "$base") en el silo."$'\n¿Quieres usarla como imagen base, sin volver a construirla?' 10 70; then
             args+=( --base "$(basename "$base")" )
@@ -195,7 +212,7 @@ asistente_cluster() {
     fi
 
     sel="$(wt --checklist $'Opciones (marca con la barra espaciadora):' 15 78 5 \
-        limpiar             "Eliminar antes ${CLUSTER_NODOS[*]} si ya existen" off \
+        limpiar             "Eliminar antes los nodos y la imagen base si ya existen" off \
         discos-crea-entorno "${#UNIDADES_POSIBLES_NODO[@]} discos por nodo (vdb..vdh), como crea-entorno.sh" off \
         ssh-pass            "Contraseña para administrador y SSH por contraseña" off \
         no-root             "No habilitar al usuario root" off \
@@ -212,6 +229,7 @@ asistente_base() {
 
     nombre="$(wt --inputbox $'Nombre de la imagen base.\nQuedará NOMBRE.qcow2 en el silo, sin máquina, lista para hacer copias.' 11 70 "$CLUSTER_BASE")" || return 0
     if [[ -z "$nombre" ]]; then return 0; fi
+    nombre_valido_asistente "$nombre" || return 0
     elegir_imagen_gluster || return 0
     args+=( ${IMAGEN_ARGS[@]+"${IMAGEN_ARGS[@]}"} )
     if wt --defaultno --yesno $'Si ya existe una máquina o un disco con ese nombre,\n¿eliminarlos antes (--limpiar)?' 9 70; then
@@ -225,6 +243,8 @@ asistente_base() {
 asistente_listar() {
     local d f sel estado ip lista n tipo
     local -a items=()
+
+    cargar_respaldos
 
     while IFS= read -r d; do
         if [[ -z "$d" ]]; then continue; fi
@@ -280,17 +300,17 @@ ficha_maquina() {   # DOMINIO
         n=$(( n + 1 ))
     fi
     texto+=$'\n'"Consola : virsh console $d"
-    texto+=$'\n\n'"Para eliminarla con sus discos: $0 --eliminar ${d#"${PREFIJO_DOMINIO}-"}"
+    texto+=$'\n\n'"Para eliminarla con sus discos: $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--eliminar ${d#"${PREFIJO_DOMINIO}-"}"
     n=$(( n + 3 ))
     wt --msgbox "$texto" $(( n + 6 )) 78 || true
 }
 
 ficha_disco() {   # FICHERO
     local f="$1" vs texto
-    vs="$(qemu-img info -U --output=json "$f" 2>/dev/null | jq -r '."virtual-size" // empty' 2>/dev/null || true)"
+    vs="$(tam_virtual "$f")"
     texto="Disco   : $(basename "$f")"$'\n'"Ruta    : $f"
     if [[ "$vs" =~ ^[0-9]+$ ]]; then
-        texto+=$'\n'"Tamaño  : $(( (vs + 1073741823) / 1073741824 )) GiB (virtual)"
+        texto+=$'\n'"Tamaño  : $(bytes_a_gib "$vs") GiB (virtual)"
     fi
     texto+=$'\n'"Qué es  : $(descripcion_disco_suelto "$f")"
     wt --msgbox "$texto" 11 78 || true
@@ -307,7 +327,7 @@ asistente_eliminar() {
     done < <(dominios_propios)
 
     if (( ${#items[@]} == 0 )); then
-        wt --msgbox "No tienes máquinas (dominios ${PREFIJO_DOMINIO}-*)."$'\nLos discos sueltos del silo se ven en "Ver lo que tengo" y se eliminan\ncon "Eliminar todas mis máquinas".' 11 72 || true
+        wt --msgbox "No tienes máquinas (dominios ${PREFIJO_DOMINIO}-*)."$'\nLos discos sueltos del silo se ven en "Mostrar mis máquinas virtuales"\ny se eliminan con "Eliminar todas mis máquinas virtuales".' 11 76 || true
         return 0
     fi
 
@@ -329,6 +349,14 @@ ejecutar_asistente() {   # [--directo] ARGUMENTO...
     fi
     if [[ -n "$PREFIJO_OPT" ]]; then
         set -- --prefijo "$PREFIJO_OPT" "$@"
+    fi
+    # Con --menu --dry-run, todo lo que se lance es también una simulación; con
+    # --menu --si, sin preguntas
+    if $SI; then
+        set -- --si "$@"
+    fi
+    if $DRY_RUN; then
+        set -- --dry-run "$@"
     fi
 
     mostrar="$0"
@@ -352,7 +380,12 @@ ejecutar_asistente() {   # [--directo] ARGUMENTO...
     echo
     # Ctrl+C lo atiende el proceso hijo, que deshace lo suyo; aquí se ignora
     trap '' INT
-    bash "$0" "$@" || rc=$?
+    if [[ -n "$PASS_ASISTENTE" ]]; then
+        CI_PROVISION_SSH_PASS="$PASS_ASISTENTE" bash "$0" "$@" || rc=$?
+    else
+        bash "$0" "$@" || rc=$?
+    fi
+    PASS_ASISTENTE=""
     trap 'INTERRUMPIDO=true; exit 130' INT
     echo
     if (( rc != 0 )); then

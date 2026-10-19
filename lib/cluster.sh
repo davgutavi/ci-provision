@@ -35,7 +35,7 @@ disco_base_cluster() {
     if [[ -n "$BASE_OPT" ]]; then
         echo "${SILO_DIR}/${BASE_OPT}"
     else
-        echo "${SILO_DIR}/${PREFIJO_FICHERO}${CLUSTER_BASE}.qcow2"
+        echo "${SILO_DIR}/$(disco_de "$CLUSTER_BASE")"
     fi
 }
 
@@ -63,11 +63,11 @@ objetivos_cluster() {
     OBJ_FICHEROS=()
     if [[ -z "$BASE_OPT" ]]; then
         OBJ_DOMINIOS+=( "${PREFIJO_DOMINIO}-${CLUSTER_BASE}" )
-        OBJ_FICHEROS+=( "${SILO_DIR}/${PREFIJO_FICHERO}${CLUSTER_BASE}.qcow2" )
+        OBJ_FICHEROS+=( "${SILO_DIR}/$(disco_de "$CLUSTER_BASE")" )
     fi
     for host in "${CLUSTER_NODOS[@]}"; do
         OBJ_DOMINIOS+=( "${PREFIJO_DOMINIO}-${host}" )
-        OBJ_FICHEROS+=( "${SILO_DIR}/${PREFIJO_FICHERO}${host}.qcow2" )
+        OBJ_FICHEROS+=( "${SILO_DIR}/$(disco_de "$host")" )
         while IFS= read -r d; do
             OBJ_FICHEROS+=( "$d" )
         done < <(discos_extra_nodo "$host")
@@ -174,11 +174,11 @@ mostrar_plan_cluster() {
         host="${CLUSTER_NODOS[$i]}"
         vm="${PREFIJO_DOMINIO}-${host}"
         generar_cloudinit "$vm" "$host" "${CLUSTER_IPS[$i]}" nodo
-        echo "    $vm: disco ${PREFIJO_FICHERO}${host}.qcow2 (COW de $(basename "$base_disco")), IP ${CLUSTER_IPS[$i]}, cloud-init en $WORKDIR/"
+        echo "    $vm: disco $(disco_de "$host") (COW de $(basename "$base_disco")), IP ${CLUSTER_IPS[$i]}, cloud-init en $WORKDIR/"
         if (( i == 0 )); then
             extras=()
             while IFS= read -r d; do extras+=( "$d" ); done < <(discos_extra_nodo "$host")
-            construir_comando "$vm" "$RAM_MB" "$VCPUS" "${SILO_DIR}/${PREFIJO_FICHERO}${host}.qcow2" "${extras[@]}"
+            construir_comando "$vm" "$RAM_MB" "$VCPUS" "${SILO_DIR}/$(disco_de "$host")" "${extras[@]}"
             comando_primero="$(imprimir_comando)"
         fi
     done
@@ -254,7 +254,7 @@ ejecutar_cluster() {
         host="${CLUSTER_NODOS[$i]}"
         vm="${PREFIJO_DOMINIO}-${host}"
         ip="${CLUSTER_IPS[$i]}"
-        disco="${SILO_DIR}/${PREFIJO_FICHERO}${host}.qcow2"
+        disco="${SILO_DIR}/$(disco_de "$host")"
         extras=()
         while IFS= read -r d; do extras+=( "$d" ); done < <(discos_extra_nodo "$host")
 

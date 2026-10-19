@@ -5,6 +5,7 @@
 #   MOCK_VIRT_INSTALL_FALLA=1        falla sin crear nada, como si libvirt diera error
 #   MOCK_VIRT_INSTALL_FALLA_TARDE=1  define el dominio y luego falla (error tardío o Ctrl+C)
 #   MOCK_VIRT_INSTALL_FALLA_EN=N     falla (sin crear nada) en la llamada número N
+#   MOCK_ISO_PERSISTENTE=1           la ISO de cloud-init queda también en la definición persistente
 
 S="${MOCK_STATE:?MOCK_STATE no definido}"
 mkdir -p "$S/dominios"
@@ -64,6 +65,7 @@ mkdir -p "$dir"
 echo "running" > "$dir/estado"
 printf '%s\n' "${discos[@]}" > "$dir/discos"
 touch "$dir/iso"
+if [[ -n "${MOCK_ISO_PERSISTENTE:-}" ]]; then touch "$dir/iso_persistente"; fi
 
 # IP: la fija del network-config, o una "de DHCP"
 ip=""

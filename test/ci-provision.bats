@@ -135,8 +135,10 @@ qinfo() {
     run bash "$SCRIPT" --no-wait server1
     assert_success
     assert_output --partial "Se descarga de:"
-    assert_output --partial "Imagen base descargada"
-    [ "$(llamadas '^wget .*cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img')" -eq 1 ]
+    assert_output --partial "Imagen base lista"
+    assert_output --partial "Suma SHA-256 comprobada"
+    [ "$(llamadas '^wget .*cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img$')" -eq 1 ]
+    [ "$(llamadas '^wget .*cloud-images.ubuntu.com/noble/current/SHA256SUMS')" -eq 1 ]
     [ "$(qinfo "$SILO/noble-server-cloudimg-amd64.img" '.format')" = "qcow2" ]
     [ ! -e "$SILO/noble-server-cloudimg-amd64.img.descargando" ]
     [ "$(qinfo "$SILO/server1.qcow2" '."backing-filename"')" = "noble-server-cloudimg-amd64.img" ]
@@ -350,7 +352,7 @@ qinfo() {
 
 @test "--dry-run con --limpiar solo enumera lo que se eliminaría" {
     touch "$SILO/server1.qcow2"
-    run bash "$SCRIPT" --dry-run --limpiar server1 </dev/null
+    run bash "$SCRIPT" --si --dry-run --limpiar server1 </dev/null
     assert_success
     assert_output --partial "no se elimina nada"
     [ -e "$SILO/server1.qcow2" ]
@@ -516,7 +518,7 @@ qinfo() {
     assert_output --partial "Ubuntu 24.04 (ubuntu-base.qcow2 del boletín 1)"
     # administrador: solo se le añade la clave; su contraseña y su sudo, intactos
     local u="$SILO/cloudinit-${USUARIO}-gluster-base/cip-user.yaml"
-    [ "$(sed -n '/^users:/,/^[a-z]/p' "$u" | tr -s ' \n' ' ')" = "users: - name: administrador lock_passwd: false ssh_authorized_keys: - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC0falsa ${USUARIO}@test chpasswd: " ]
+    [ "$(sed -n '/^users:/,/^[a-z]/p' "$u" | tr -s ' \n' ' ')" = "users: - name: administrador lock_passwd: false ssh_authorized_keys: - 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC0falsa ${USUARIO}@test' chpasswd: " ]
     ! grep -q "ssh_pwauth" "$u"
     grep -A1 "^    - name: root" "$u" | grep -q "password: s1st3mas"
 }
@@ -577,7 +579,7 @@ qinfo() {
 @test "--prefijo: dominio y discos con prefijo; lo de tu usuario no se toca ni con --limpiar" {
     run bash "$SCRIPT" server1
     assert_success
-    run bash "$SCRIPT" --limpiar --prefijo demo --extra-disks server1 </dev/null
+    run bash "$SCRIPT" --si --limpiar --prefijo demo --extra-disks server1 </dev/null
     assert_success
     [ "$(llamadas '--name demo-server1')" -eq 1 ]
     [ -e "$SILO/demo-server1.qcow2" ]
@@ -624,7 +626,7 @@ qinfo() {
     assert_failure 10
     run bash "$SCRIPT" --dry-run --glusterfs gluster-base 192.168.7.5
     assert_failure 10
-    run bash "$SCRIPT" --dry-run --imagen debian12 --base debian12.qcow2 server1
+    run bash "$SCRIPT" --dry-run --imagen fedora --base debian12.qcow2 server1
     assert_failure 10
     run bash "$SCRIPT" --dry-run --discos-nodo 7 server1
     assert_failure 10
@@ -657,7 +659,7 @@ qinfo() {
 @test "--limpiar se niega a borrar un disco que usa otra máquina o que es respaldo de otra copia" {
     run bash "$SCRIPT" --disco server1.qcow2 otra
     assert_success
-    run bash "$SCRIPT" --limpiar server1 </dev/null
+    run bash "$SCRIPT" --si --limpiar server1 </dev/null
     assert_failure 21
     assert_output --partial "lo usa la máquina '${USUARIO}-otra'"
     dominio_existe "${USUARIO}-otra"
@@ -666,7 +668,7 @@ qinfo() {
     run bash "$SCRIPT" --glusterfs gluster-base
     assert_success
     (cd "$SILO" && qemu-img create -f qcow2 -b gluster-base.qcow2 -F qcow2 nodo1.qcow2 64G >/dev/null)
-    run bash "$SCRIPT" --limpiar --glusterfs gluster-base </dev/null
+    run bash "$SCRIPT" --si --limpiar --glusterfs gluster-base </dev/null
     assert_failure 21
     assert_output --partial "imagen base de nodo1.qcow2"
     [ -e "$SILO/gluster-base.qcow2" ]
@@ -723,10 +725,10 @@ qinfo() {
     run bash "$SCRIPT" --dry-run debian12
     assert_failure 10
     refute_output --partial "--base"
-    run bash "$SCRIPT" --limpiar debian12 </dev/null
+    run bash "$SCRIPT" --si --limpiar debian12 </dev/null
     assert_failure 10
     [ -e "$SILO/debian12.qcow2" ]
-    run bash "$SCRIPT" --limpiar --disco noble-server-cloudimg-amd64.img server1 </dev/null
+    run bash "$SCRIPT" --si --limpiar --disco noble-server-cloudimg-amd64.img server1 </dev/null
     assert_failure 10
     [ -e "$SILO/noble-server-cloudimg-amd64.img" ]
 }
@@ -761,10 +763,10 @@ qinfo() {
     assert_success
     run bash "$SCRIPT" server2
     assert_success
-    run bash "$SCRIPT" --dry-run --eliminar server1 </dev/null
+    run bash "$SCRIPT" --si --dry-run --eliminar server1 </dev/null
     assert_success
     dominio_existe "${USUARIO}-server1"
-    run bash "$SCRIPT" --eliminar server1 </dev/null
+    run bash "$SCRIPT" --si --eliminar server1 </dev/null
     assert_success
     assert_output --partial "máquina ${USUARIO}-server1 eliminada"
     ! dominio_existe "${USUARIO}-server1"
@@ -772,22 +774,22 @@ qinfo() {
     [ ! -d "$SILO/cloudinit-${USUARIO}-server1" ]
     dominio_existe "${USUARIO}-server2"
     [ -e "$SILO/server2.qcow2" ] && [ -e "$SILO/debian12.qcow2" ]
-    run bash "$SCRIPT" --eliminar debian12 </dev/null
+    run bash "$SCRIPT" --si --eliminar debian12 </dev/null
     assert_failure 22
     assert_output --partial "debian12.qcow2: es una imagen cloud de partida (nunca se borra)"
     [ -e "$SILO/debian12.qcow2" ]
-    run bash "$SCRIPT" --eliminar server9 </dev/null
+    run bash "$SCRIPT" --si --eliminar server9 </dev/null
     assert_failure 22
-    run bash "$SCRIPT" --eliminar "${USUARIO}-server2"
+    run bash "$SCRIPT" --si --eliminar "${USUARIO}-server2"
     assert_failure 20
-    run bash "$SCRIPT" --eliminar
+    run bash "$SCRIPT" --si --eliminar
     assert_failure 10
 }
 
 @test "--eliminar conserva un disco que usa otra máquina o del que dependen copias" {
     run bash "$SCRIPT" --disco server1.qcow2 otra
     assert_success
-    run bash "$SCRIPT" --eliminar server1 </dev/null
+    run bash "$SCRIPT" --si --eliminar server1 </dev/null
     assert_failure 22
     assert_output --partial "lo usa la máquina '${USUARIO}-otra'"
     dominio_existe "${USUARIO}-otra"
@@ -798,12 +800,12 @@ qinfo() {
     run bash "$SCRIPT" --base gluster-base.qcow2 nodo1
     assert_success
     # Solo quedan sus ficheros cloud-init por eliminar: el disco se conserva y se explica
-    run bash "$SCRIPT" --eliminar gluster-base </dev/null
+    run bash "$SCRIPT" --si --eliminar gluster-base </dev/null
     assert_success
     assert_output --partial "gluster-base.qcow2: es la imagen base de nodo1.qcow2"
     [ -e "$SILO/gluster-base.qcow2" ]
     [ ! -d "$SILO/cloudinit-${USUARIO}-gluster-base" ]
-    run bash "$SCRIPT" --eliminar nodo1 gluster-base </dev/null
+    run bash "$SCRIPT" --si --eliminar nodo1 gluster-base </dev/null
     assert_success
     ! dominio_existe "${USUARIO}-nodo1"
     [ ! -e "$SILO/nodo1.qcow2" ] && [ ! -e "$SILO/gluster-base.qcow2" ]
@@ -816,10 +818,10 @@ qinfo() {
     assert_success
     run bash "$SCRIPT" --prefijo demo server1
     assert_success
-    run bash "$SCRIPT" --dry-run --eliminar-todo </dev/null
+    run bash "$SCRIPT" --si --dry-run --eliminar-todo </dev/null
     assert_success
     dominio_existe "${USUARIO}-server1"
-    run bash "$SCRIPT" --eliminar-todo </dev/null
+    run bash "$SCRIPT" --si --eliminar-todo </dev/null
     assert_success
     ! dominio_existe "${USUARIO}-server1"
     [ ! -e "$SILO/server1.qcow2" ] && [ ! -e "$SILO/gluster-base.qcow2" ]
@@ -828,11 +830,11 @@ qinfo() {
     dominio_existe "demo-server1"
     [ -e "$SILO/demo-server1.qcow2" ]
     assert_output --partial "demo-server1.qcow2: lo usa la máquina 'demo-server1'"
-    run bash "$SCRIPT" --prefijo demo --eliminar-todo </dev/null
+    run bash "$SCRIPT" --si --prefijo demo --eliminar-todo </dev/null
     assert_success
     ! dominio_existe "demo-server1"
     [ ! -e "$SILO/demo-server1.qcow2" ]
-    run bash "$SCRIPT" --eliminar-todo </dev/null
+    run bash "$SCRIPT" --si --eliminar-todo </dev/null
     assert_failure 22
 }
 
@@ -880,13 +882,13 @@ qinfo() {
 @test "--menu: almacenamiento extra pide el nombre, sugiere la IP .2 y marca los discos; eliminar elige de la lista" {
     export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
     printf '%s\n' "0 extra" "0 server1" "0 192.168.7.2" "0 noble" "0 \"extra-disks\"" "0" "0 eliminar" "0 \"server1\"" "0" "1" > "$MOCK_WHIPTAIL"
-    run bash "$SCRIPT" --menu </dev/null
+    run bash "$SCRIPT" --menu --si </dev/null
     assert_success
     grep -q -- ' 16 70 192.168.7.2$' "$MOCK_STATE/log"
     grep -q -- '--radiolist .* noble Ubuntu 24.04 (boletín 2) on debian12 Debian 12 (boletín 1) off$' "$MOCK_STATE/log"
     grep -q -- 'extra-disks Seis discos extra vdb..vdg de 40G on ' "$MOCK_STATE/log"
-    assert_output --partial "→ $SCRIPT --extra-disks server1 192.168.7.2"
-    assert_output --partial "→ $SCRIPT --eliminar server1"
+    assert_output --partial "→ $SCRIPT --si --extra-disks server1 192.168.7.2"
+    assert_output --partial "→ $SCRIPT --si --eliminar server1"
     grep -q -- '--checklist .* server1 en ejecución off' "$MOCK_STATE/log"
     ! dominio_existe "${USUARIO}-server1"
     [ ! -e "$SILO/server1-vdb.qcow2" ]
@@ -960,7 +962,8 @@ qinfo() {
     run bash "$SCRIPT" --dry-run --tam 20g server1
     assert_success
     assert_output --partial "20G"
-    MOCK_CI_RESULT="degraded done" run bash "$SCRIPT" server1
+    # Como cloud-init >= 23.4: escribe "done" pero sale con código 2
+    MOCK_CI_RESULT=degraded run bash "$SCRIPT" server1
     assert_success
     assert_output --partial "informa de errores"
 }
@@ -1009,7 +1012,7 @@ qinfo() {
 }
 
 @test "si cloud-init no termina pero el agente ya da la IP, el aviso y el resumen la muestran" {
-    MOCK_CI_RUNNING=999 WAIT_TIMEOUT=3 run bash "$SCRIPT" server1
+    MOCK_CI_RUNNING=999 CI_PROVISION_WAIT_TIMEOUT=3 run bash "$SCRIPT" server1
     assert_success
     assert_output --partial "ya responde en 192.168.7."
     refute_output --partial "consúltala con"
@@ -1032,7 +1035,8 @@ qinfo() {
     # "$BASH": el bash con el que corre bats, no el /bin/bash del sistema (en macOS es 3.2)
     PATH="$bin:/usr/bin:/bin" run "$BASH" "$SCRIPT" server1
     assert_success
-    [ "$(llamadas '^curl')" -eq 1 ]
+    [ "$(llamadas '^curl .*noble-server-cloudimg-amd64.img$')" -eq 1 ]
+    [ "$(llamadas '^curl .*SHA256SUMS')" -eq 1 ]
     [ "$(qinfo "$SILO/noble-server-cloudimg-amd64.img" '.format')" = "qcow2" ]
 }
 
@@ -1046,7 +1050,7 @@ qinfo() {
 @test "si --limpiar no consigue eliminar el dominio: error 21 con el comando" {
     run bash "$SCRIPT" server1
     assert_success
-    MOCK_UNDEFINE_FALLA=1 run bash "$SCRIPT" --limpiar server1 </dev/null
+    MOCK_UNDEFINE_FALLA=1 run bash "$SCRIPT" --si --limpiar server1 </dev/null
     assert_failure 21
     assert_output --partial "No se ha podido eliminar el dominio"
     assert_output --partial "virsh undefine ${USUARIO}-server1 --snapshots-metadata"
@@ -1181,7 +1185,7 @@ qinfo() {
     touch "$SILO/otro.qcow2" "$SILO/server2.qcow2"
     : > "$MOCK_STATE/log"
 
-    run bash "$SCRIPT" --limpiar --extra-disks server1 </dev/null
+    run bash "$SCRIPT" --si --limpiar --extra-disks server1 </dev/null
     assert_success
     assert_output --partial "--limpiar: se van a eliminar"
     [ "$(llamadas "undefine ${USUARIO}-server1")" -eq 1 ]
@@ -1249,7 +1253,7 @@ qinfo() {
 }
 
 @test "si se agota el tiempo: aviso, sin expulsar el medio, y el resumen igualmente" {
-    MOCK_AGENT_DELAY=999 WAIT_TIMEOUT=3 run bash "$SCRIPT" server1
+    MOCK_AGENT_DELAY=999 CI_PROVISION_WAIT_TIMEOUT=3 run bash "$SCRIPT" server1
     assert_success
     assert_output --partial "no ha(n) terminado en 3s"
     [ "$(llamadas 'change-media')" -eq 0 ]
@@ -1356,7 +1360,7 @@ qinfo() {
     [ "$(grep -o -- '--disk path=' <<< "$linea" | wc -l | tr -d ' ')" -eq 8 ]
     ! grep -q "device: /dev/vde" "$SILO/cloudinit-${USUARIO}-server3/cip-user.yaml"
     assert_output --partial "vdb, vdc y vdd en xfs, montados en /gluster1 /gluster2 /gluster3; vde..vdh sin formatear"
-    run bash "$SCRIPT" --dry-run --prefijo otro --gluster-cluster --discos-nodo 4
+    run bash "$SCRIPT" --dry-run --prefijo otro --gluster-cluster --discos-nodo 4 --ip-inicial 20
     assert_success
     assert_output --partial "; vde sin formatear."
     run bash "$SCRIPT" --dry-run --gluster-cluster --discos-nodo 2
@@ -1384,7 +1388,7 @@ qinfo() {
     assert_output --partial "server3-vdd.qcow2"
     [ "$(llamadas '^virt-install')" -eq 0 ]
 
-    run bash "$SCRIPT" --limpiar --gluster-cluster </dev/null
+    run bash "$SCRIPT" --si --limpiar --gluster-cluster </dev/null
     assert_success
     [ "$(llamadas '^virt-install')" -eq 5 ]
 }
@@ -1392,7 +1396,7 @@ qinfo() {
 @test "clúster con --base: se omite la fase 1 y --limpiar no toca la imagen base" {
     qemu-img create -f qcow2 -b debian12.qcow2 -F qcow2 "$SILO/mibase.qcow2" 40G >/dev/null
     touch "$SILO/server2.qcow2"
-    run bash "$SCRIPT" --limpiar --gluster-cluster --base mibase.qcow2 </dev/null
+    run bash "$SCRIPT" --si --limpiar --gluster-cluster --base mibase.qcow2 </dev/null
     assert_success
     assert_output --partial "Fase 1 de 2: se omite"
     refute_output --partial "Creando la máquina '${USUARIO}-gluster-base'"
@@ -1462,4 +1466,347 @@ qinfo() {
     run bash "$SCRIPT" --dry-run --gluster-cluster --ram 2048 --vcpus 2
     assert_success
     assert_output --partial "2048 MB y 2 vCPU"
+}
+
+#############################################
+# Regresión de la auditoría de la v3.0.0
+#############################################
+
+@test "auditoría 1: --eliminar-todo no borra la imagen base de una copia que se conserva (aunque sea indirecta)" {
+    run bash "$SCRIPT" --glusterfs gluster-base
+    assert_success
+    # Cadena: gluster-base ← intermedia ← copia, y 'copia' la usa una máquina hecha a mano
+    (cd "$SILO" && qemu-img create -f qcow2 -b gluster-base.qcow2 -F qcow2 intermedia.qcow2 >/dev/null \
+                && qemu-img create -f qcow2 -b intermedia.qcow2 -F qcow2 copia.qcow2 >/dev/null)
+    definir_dominio SERVIDOR-A-MANO running "$SILO/copia.qcow2"
+    run bash "$SCRIPT" --si --eliminar-todo </dev/null
+    assert_success
+    assert_output --partial "copia.qcow2: lo usa la máquina 'SERVIDOR-A-MANO'"
+    assert_output --partial "intermedia.qcow2: es la imagen base de copia.qcow2, que se conserva"
+    assert_output --partial "gluster-base.qcow2: es la imagen base de intermedia.qcow2, que se conserva"
+    [ -e "$SILO/gluster-base.qcow2" ] && [ -e "$SILO/intermedia.qcow2" ] && [ -e "$SILO/copia.qcow2" ]
+}
+
+@test "auditoría 1: --eliminar conserva la base de un disco que se queda porque lo usa otra máquina" {
+    run bash "$SCRIPT" --glusterfs gluster-base
+    assert_success
+    run bash "$SCRIPT" --base gluster-base.qcow2 server1
+    assert_success
+    # Otra máquina (otro nombre) usa también server1.qcow2
+    definir_dominio "${USUARIO}-copia" running "$SILO/server1.qcow2"
+    run bash "$SCRIPT" --si --eliminar server1 gluster-base </dev/null
+    assert_success
+    assert_output --partial "server1.qcow2: lo usa la máquina '${USUARIO}-copia'"
+    assert_output --partial "gluster-base.qcow2: es la imagen base de server1.qcow2, que se conserva"
+    [ -e "$SILO/gluster-base.qcow2" ] && [ -e "$SILO/server1.qcow2" ]
+    ! dominio_existe "${USUARIO}-server1"
+}
+
+@test "auditoría 2: sin terminal y sin --si no se elimina nada (error 23); libvirt del sistema" {
+    run bash "$SCRIPT" server1
+    assert_success
+    [ "$(cat "$MOCK_STATE/uri")" = "qemu:///system" ]
+    touch "$SILO/mi-copia-seguridad.qcow2"
+    run bash "$SCRIPT" --eliminar-todo </dev/null
+    assert_failure 23
+    assert_output --partial "--si"
+    dominio_existe "${USUARIO}-server1"
+    [ -e "$SILO/mi-copia-seguridad.qcow2" ] && [ -e "$SILO/server1.qcow2" ]
+    run bash "$SCRIPT" --eliminar server1 </dev/null
+    assert_failure 23
+    dominio_existe "${USUARIO}-server1"
+    run bash "$SCRIPT" --limpiar server1 </dev/null
+    assert_failure 23
+    dominio_existe "${USUARIO}-server1"
+    [ "$(llamadas '^virt-install')" -eq 1 ]
+    # Aunque el entorno traiga otra (p.ej. qemu:///session), se usa la del sistema
+    LIBVIRT_DEFAULT_URI=qemu:///session run bash "$SCRIPT" --listar
+    [ "$(cat "$MOCK_STATE/uri")" = "qemu:///system" ]
+}
+
+@test "auditoría 3: --eliminar y --limpiar no borran un disco que usa una máquina con otro nombre" {
+    run bash "$SCRIPT" server1
+    assert_success
+    run bash "$SCRIPT" --si --eliminar server1 </dev/null
+    assert_success
+    qemu-img create -f qcow2 "$SILO/server1.qcow2" 1G >/dev/null
+    definir_dominio mi-servidor running "$SILO/server1.qcow2"
+    run bash "$SCRIPT" --si --eliminar server1 </dev/null
+    assert_failure 22
+    assert_output --partial "server1.qcow2: lo usa la máquina 'mi-servidor'"
+    [ -e "$SILO/server1.qcow2" ]
+    run bash "$SCRIPT" --si --limpiar server1 </dev/null
+    assert_failure 21
+    assert_output --partial "lo usa la máquina 'mi-servidor'"
+    [ "$(qinfo "$SILO/server1.qcow2" '."virtual-size"')" = "1073741824" ]
+}
+
+@test "auditoría 4: con --prefijo no se tocan las máquinas de otro usuario que se llamen igual" {
+    # 'demo-server1' es de otro usuario: sus discos no están en este silo
+    definir_dominio demo-server1 running /home/otro/imagenesMV/server1.qcow2
+    run bash "$SCRIPT" --si --prefijo demo --limpiar server1 </dev/null
+    assert_failure 21
+    assert_output --partial "sus discos no están en tu silo"
+    dominio_existe demo-server1
+    run bash "$SCRIPT" --si --prefijo demo --eliminar server1 </dev/null
+    assert_failure 22
+    assert_output --partial "no la ha creado este script para ti"
+    run bash "$SCRIPT" --si --prefijo demo --eliminar-todo </dev/null
+    assert_failure 22
+    dominio_existe demo-server1
+    [ "$(llamadas 'undefine demo-server1')" -eq 0 ]
+    run bash "$SCRIPT" --prefijo demo --listar
+    assert_output --partial "No tienes máquinas"
+}
+
+@test "auditoría 5 y 6: --menu --dry-run no crea nada; la contraseña no va en la línea de órdenes" {
+    export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
+    printf '%s\n' "0 basica" "0 web" "0 " "0 noble" "0 \"ssh-pass\"" "0 Secreta1" "0" "1" > "$MOCK_WHIPTAIL"
+    # Un 'bash' que anota sus argumentos: así se ve qué recibe el proceso hijo
+    local bin="$BATS_TEST_TMPDIR/bin"
+    mkdir -p "$bin"
+    printf '#!%s\necho "$*" >> "%s/argv"\nexec %q "$@"\n' "$BASH" "$MOCK_STATE" "$BASH" > "$bin/bash"
+    chmod +x "$bin/bash"
+    PATH="$bin:$PATH" run bash "$SCRIPT" --menu --dry-run </dev/null
+    assert_success
+    assert_output --partial "→ $SCRIPT --dry-run --ssh-pass •••••• web"
+    assert_output --partial "MODO SIMULACIÓN"
+    ! dominio_existe "${USUARIO}-web"
+    [ ! -e "$SILO/web.qcow2" ]
+    grep -q -- "--ssh-pass - web" "$MOCK_STATE/argv"
+    ! grep -q "Secreta1" "$MOCK_STATE/argv"
+    grep -q "password: 'Secreta1'" "$SILO/cloudinit-${USUARIO}-web.dry-run/cip-user.yaml"
+}
+
+@test "auditoría 7: cloud-init terminado con avisos (código 2) no se da por bueno en la base GlusterFS" {
+    MOCK_CI_RESULT=degraded run bash "$SCRIPT" --glusterfs gluster-base
+    assert_failure 71
+    MOCK_CI_RESULT=degraded run bash "$SCRIPT" server1
+    assert_success
+    assert_output --partial "informa de errores"
+}
+
+@test "auditoría 8: --base con la cadena rota (39), sin imagen reconocible (aviso) o con --imagen" {
+    (cd "$SILO" && qemu-img create -u -f qcow2 -b no-existe.qcow2 -F qcow2 rota.qcow2 1G >/dev/null)
+    run bash "$SCRIPT" --dry-run --base rota.qcow2 server1
+    assert_failure 39
+    assert_output --partial "backing-chain"
+    cp "$SILO/noble-server-cloudimg-amd64.img" "$SILO/mi-noble.qcow2"
+    run bash "$SCRIPT" --dry-run --base mi-noble.qcow2 server1
+    assert_success
+    assert_output --partial "AVISO: no sé de qué imagen sale mi-noble.qcow2"
+    assert_output --partial "Ubuntu 24.04 (imagen cloud); variante ubuntu24.04"
+    grep -q "NOPASSWD" "$SILO/cloudinit-${USUARIO}-server1.dry-run/cip-user.yaml"
+    run bash "$SCRIPT" --dry-run --base mi-noble.qcow2 --imagen debian12 server1
+    assert_success
+    refute_output --partial "AVISO: no sé"
+    assert_output --partial "variante debian12"
+}
+
+@test "auditoría 9: una clave pública con ': ' en el comentario va entre comillas en el YAML" {
+    echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFalsa David: portátil #1" > "$HOME/.ssh/id_rsa.pub"
+    run bash "$SCRIPT" --dry-run server1
+    assert_success
+    grep -qxF "      - 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFalsa David: portátil #1'" "$SILO/cloudinit-${USUARIO}-server1.dry-run/cip-user.yaml"
+}
+
+@test "auditoría 10: si el DHCP ocupa .10-.13, el clúster propone --ip-inicial, que funciona" {
+    quitar_red "${USUARIO}-red"
+    definir_red "${USUARIO}-red" 192.168.144.1 255.255.255.0 192.168.144.2 192.168.144.127
+    run bash "$SCRIPT" --dry-run --gluster-cluster
+    assert_failure 42
+    assert_output --partial "--ip-inicial 128"
+    refute_output --partial "omitir el parámetro IP"
+    run bash "$SCRIPT" --dry-run --gluster-cluster --ip-inicial 200
+    assert_success
+    assert_output --partial "${USUARIO}-server1  →  192.168.144.200"
+    assert_output --partial "${USUARIO}-server4  →  192.168.144.203"
+    run bash "$SCRIPT" --dry-run --gluster-cluster --ip-inicial 252
+    assert_failure 13
+    run bash "$SCRIPT" --dry-run --ip-inicial 20 server1
+    assert_failure 10
+}
+
+@test "auditoría 11: una IP fija que ya tiene otra máquina, o que responde a ping, se rechaza" {
+    run bash "$SCRIPT" server1 192.168.7.2
+    assert_success
+    run bash "$SCRIPT" --dry-run server2 192.168.7.2
+    assert_failure 42
+    assert_output --partial "ya la tiene asignada tu máquina '${USUARIO}-server1'"
+    assert_output --partial "--eliminar server1"
+    # Rehacerla con --limpiar, con la misma IP, sí vale (aunque responda a ping)
+    echo 192.168.7.2 > "$MOCK_STATE/ping_responde"
+    run bash "$SCRIPT" --si --limpiar server1 192.168.7.2 </dev/null
+    assert_success
+    echo 192.168.7.30 > "$MOCK_STATE/ping_responde"
+    run bash "$SCRIPT" --dry-run server3 192.168.7.30
+    assert_failure 42
+    assert_output --partial "Algo responde ya en la IP '192.168.7.30'"
+}
+
+@test "auditoría 12: --base no admite el disco de una máquina apagada" {
+    run bash "$SCRIPT" server1
+    assert_success
+    run virsh shutdown "${USUARIO}-server1"
+    run bash "$SCRIPT" --dry-run --base server1.qcow2 server2
+    assert_failure 39
+    assert_output --partial "es el disco de la máquina '${USUARIO}-server1'"
+}
+
+@test "auditoría 14: números con ceros a la izquierda se leen en decimal" {
+    run bash "$SCRIPT" --dry-run --tam 080G --ram 0900 --vcpus 02 server1 192.168.7.020
+    assert_success
+    refute_output --partial "value too great"
+    assert_output --partial "IP      : 192.168.7.20, disponible"
+    assert_output --partial "Recursos: 900 MB y 2 vCPU"
+    assert_output --partial "(copia COW de noble-server-cloudimg-amd64.img, 80G)"
+    grep -q -- "- 192.168.7.20/24" "$SILO/cloudinit-${USUARIO}-server1.dry-run/cip-net.yaml"
+    run bash "$SCRIPT" --dry-run --gluster-cluster --discos-nodo 07
+    assert_success
+    run bash "$SCRIPT" --dry-run --tam 08G server1
+    assert_success
+    assert_output --partial "(copia COW de noble-server-cloudimg-amd64.img, 8G)"
+    run bash "$SCRIPT" --dry-run --tam 0G server1
+    assert_failure 15
+}
+
+@test "auditoría 15: una red con DHCPv6 no rompe nada" {
+    quitar_red "${USUARIO}-red"
+    {
+        echo "<network>"
+        echo "  <name>${USUARIO}-red</name>"
+        echo "  <ip family='ipv6' address='fd00::1' prefix='64'>"
+        echo "    <dhcp><range start='fd00::100' end='fd00::1ff'/><host name='x' ip='fd00::5'/></dhcp>"
+        echo "  </ip>"
+        echo "  <ip address='192.168.7.1' netmask='255.255.255.0'>"
+        echo "    <dhcp><range start='192.168.7.128' end='192.168.7.254'/></dhcp>"
+        echo "  </ip>"
+        echo "</network>"
+    } > "$MOCK_STATE/red-${USUARIO}-red.xml"
+    echo "${USUARIO}-red" >> "$MOCK_STATE/redes.txt"
+    run bash "$SCRIPT" --dry-run server1 192.168.7.2
+    assert_success
+    run bash "$SCRIPT" --dry-run server1 192.168.7.130
+    assert_failure 42
+}
+
+@test "auditoría 16, 17 y 22: mensajes de --user-pass, de la base que ya existe y de la clave pública" {
+    run bash "$SCRIPT" --user-pass x server1
+    assert_failure 12
+    assert_output --partial "por consola entra root"
+    refute_output --partial "'administrador' ya tiene contraseña"
+    run bash "$SCRIPT" --glusterfs gluster-base
+    assert_success
+    run bash "$SCRIPT" --dry-run --gluster-cluster
+    assert_failure 21
+    assert_output --partial "--gluster-cluster --base gluster-base.qcow2"
+    echo "esto no es una clave" > "$HOME/.ssh/id_rsa.pub"
+    run bash "$SCRIPT" --dry-run server1
+    assert_failure 31
+    assert_output --partial "no contiene una clave pública"
+    refute_output --partial "1 líneas"
+}
+
+@test "auditoría 18: los fuentes funcionan sin generar el script (src/main.sh carga todas las librerías)" {
+    run bash "$REPO_DIR/src/main.sh" --listar
+    assert_success
+    assert_output --partial "Discos del silo sin máquina"
+}
+
+@test "auditoría 19: las variables de entorno de espera llevan prefijo y se validan" {
+    CI_PROVISION_POLL_SECS=x run bash "$SCRIPT" --dry-run server1
+    assert_failure 13
+    assert_output --partial "CI_PROVISION_POLL_SECS"
+    CI_PROVISION_WAIT_TIMEOUT=abc run bash "$SCRIPT" --dry-run server1
+    assert_failure 13
+    # Las de nombre genérico ya no se leen
+    WAIT_TIMEOUT=abc POLL_SECS=x run bash "$SCRIPT" --dry-run server1
+    assert_success
+}
+
+@test "auditoría 20: el instance-id es nuevo en cada creación" {
+    run bash "$SCRIPT" --dry-run server1
+    assert_success
+    grep -qE "^instance-id: ${USUARIO}-server1-[0-9]{14}$" "$SILO/cloudinit-${USUARIO}-server1.dry-run/cip-meta.yaml"
+}
+
+@test "auditoría 21: el asistente rechaza nombres que empiezan por '-' y la ficha respeta --prefijo" {
+    export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
+    printf '%s\n' "0 basica" "0 -h" "0" "1" > "$MOCK_WHIPTAIL"
+    run bash "$SCRIPT" --menu </dev/null
+    assert_success
+    grep -q -- "El nombre '-h' no es válido" "$MOCK_STATE/log"
+    [ "$(llamadas '^virt-install')" -eq 0 ]
+    run bash "$SCRIPT" --prefijo demo server1
+    assert_success
+    printf '%s\n' "0 listar" "0 m:demo-server1" "0" "1" "1" > "$MOCK_WHIPTAIL"
+    run bash "$SCRIPT" --prefijo demo --menu </dev/null
+    assert_success
+    grep -q -- "--prefijo demo --eliminar server1" "$MOCK_STATE/log"
+}
+
+@test "auditoría 23: los nodos de ubuntu-base avisan de la contraseña común" {
+    run bash "$SCRIPT" --gluster-cluster --imagen ubuntu-base --no-wait
+    assert_success
+    assert_output --partial "AVISO: 'administrador' conserva la contraseña de ubuntu-base"
+    run bash "$SCRIPT" --si --limpiar --gluster-cluster --no-wait </dev/null
+    assert_success
+    refute_output --partial "conserva la contraseña de ubuntu-base"
+}
+
+@test "auditoría 24: la descarga se comprueba con la suma publicada; la copia compartida evita descargar" {
+    rm -f "$SILO/noble-server-cloudimg-amd64.img"
+    MOCK_SUMAS_MAL=1 run bash "$SCRIPT" --no-wait server1
+    assert_failure 37
+    assert_output --partial "no coincide con la suma publicada"
+    [ ! -e "$SILO/noble-server-cloudimg-amd64.img" ]
+    [ -z "$(ls "$SILO" | grep descargando || true)" ]
+    MOCK_SUMAS_FALLA=1 run bash "$SCRIPT" --no-wait server1
+    assert_success
+    assert_output --partial "AVISO: no se ha podido descargar"
+    [ -e "$SILO/noble-server-cloudimg-amd64.img" ]
+    # Con la imagen en el directorio compartido, se copia y no se descarga nada
+    run bash "$SCRIPT" --si --eliminar server1 </dev/null
+    mv "$SILO/noble-server-cloudimg-amd64.img" "$CI_PROVISION_DIR_COMPARTIDO/"
+    : > "$MOCK_STATE/log"
+    run bash "$SCRIPT" --dry-run server1
+    assert_output --partial "se copiará de $CI_PROVISION_DIR_COMPARTIDO/noble-server-cloudimg-amd64.img"
+    run bash "$SCRIPT" --no-wait server1
+    assert_success
+    assert_output --partial "Se copia de"
+    [ "$(llamadas '^wget')" -eq 0 ]
+    [ -e "$SILO/noble-server-cloudimg-amd64.img" ]
+}
+
+@test "auditoría 25: el rollback quita también los ficheros cloud-init" {
+    MOCK_VIRT_INSTALL_FALLA=1 run bash "$SCRIPT" server1
+    assert_failure
+    [ ! -d "$SILO/cloudinit-${USUARIO}-server1" ]
+    assert_output --partial "ficheros cloud-init"
+}
+
+@test "auditoría 26: si la ISO sigue también en la definición persistente, se expulsa de las dos" {
+    MOCK_ISO_PERSISTENTE=1 run bash "$SCRIPT" server1
+    assert_success
+    assert_output --partial "Medio de cloud-init expulsado"
+    [ ! -e "$MOCK_STATE/dominios/${USUARIO}-server1/iso" ]
+    [ ! -e "$MOCK_STATE/dominios/${USUARIO}-server1/iso_persistente" ]
+}
+
+@test "auditoría 13: --listar lee cada disco del silo una sola vez" {
+    local i
+    for i in $(seq 1 15); do
+        qemu-img create -f qcow2 "$SILO/suelto$i.qcow2" 1G >/dev/null
+    done
+    # Un qemu-img que cuenta sus llamadas
+    local bin="$BATS_TEST_TMPDIR/bin" real
+    real="$(command -v qemu-img)"
+    mkdir -p "$bin"
+    printf '#!/bin/sh\necho x >> "%s/qemu-img.n"\nexec "%s" "$@"\n' "$MOCK_STATE" "$real" > "$bin/qemu-img"
+    chmod +x "$bin/qemu-img"
+    PATH="$bin:$PATH" run bash "$SCRIPT" --listar
+    assert_success
+    assert_output --partial "suelto15.qcow2"
+    # 17 ficheros (15 sueltos y las dos imágenes cloud): antes eran cientos de llamadas
+    [ "$(wc -l < "$MOCK_STATE/qemu-img.n")" -le 20 ]
 }

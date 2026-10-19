@@ -11,17 +11,24 @@
 # Comportamiento ajustable con variables de entorno:
 #   MOCK_AGENT_DELAY=N       el agente no responde en las N primeras consultas
 #   MOCK_CI_RUNNING=N        'cloud-init status' devuelve running N veces antes de done
-#   MOCK_CI_RESULT=done|error  estado final de cloud-init
+#   MOCK_CI_RESULT=done|error|degraded  estado final de cloud-init ('degraded':
+#                            escribe "done" con código 2, como cloud-init >= 23.4)
 #   MOCK_EXEC_UNSUPPORTED=1  qemu-agent-command falla siempre
 #   MOCK_SHUTDOWN_NUNCA=1    'virsh shutdown' nunca llega a apagar la máquina
 #   MOCK_EXEC_PENDIENTE=N    guest-exec-status responde 'exited: false' N veces antes de dar el resultado
 #   MOCK_UNDEFINE_FALLA=1    'virsh undefine' falla (p.ej. instantáneas sin --snapshots-metadata)
 #   MOCK_EJECT_NUNCA=1       'change-media --eject' nunca consigue expulsar la ISO
 #   MOCK_VARIAS_IFACES=1     domifaddr muestra además una interfaz secundaria sin IPv4
+#
+# Si existe dominios/NOMBRE/iso_persistente, la ISO de cloud-init sigue también
+# en la definición persistente (lo crea virt-install con MOCK_ISO_PERSISTENTE=1),
+# y entonces 'change-media --config' sí tiene algo que expulsar.
 
 S="${MOCK_STATE:?MOCK_STATE no definido}"
 mkdir -p "$S/dominios"
 echo "virsh $*" >> "$S/log"
+# A qué libvirt se conectaría el virsh de verdad
+echo "${LIBVIRT_DEFAULT_URI:-(sin definir)}" > "$S/uri"
 
 #   MOCK_SIN_LIBVIRT=1       no hay conexión con libvirt: todo falla
 if [[ -n "${MOCK_SIN_LIBVIRT:-}" ]]; then
@@ -153,8 +160,14 @@ case "$cmd" in
             i=$(( i + 1 ))
         done < "$(dom_dir "$vm")/discos"
         # Como en los servidores reales: la definición persistente ya no tiene
-        # la ISO, pero la activa sí hasta que se expulsa
-        if $inactive || [[ ! -f "$(dom_dir "$vm")/iso" ]]; then
+        # la ISO (salvo con iso_persistente), pero la activa sí hasta que se expulsa
+        if $inactive; then
+            if [[ -f "$(dom_dir "$vm")/iso_persistente" ]]; then
+                printf ' sda      /var/lib/libvirt/boot/virtinst-xxxxxx-cloudinit.iso\n'
+            else
+                printf ' sda      -\n'
+            fi
+        elif [[ ! -f "$(dom_dir "$vm")/iso" ]]; then
             printf ' sda      -\n'
         else
             printf ' sda      /var/lib/libvirt/boot/virtinst-xxxxxx-cloudinit.iso\n'
@@ -165,6 +178,11 @@ case "$cmd" in
         vm="$1"
         existe_dominio "$vm" || { echo "error: failed to get domain '$vm'" >&2; exit 1; }
         if [[ "$*" == *--config* ]]; then
+            if [[ -f "$(dom_dir "$vm")/iso_persistente" && -z "${MOCK_EJECT_NUNCA:-}" ]]; then
+                rm -f "$(dom_dir "$vm")/iso_persistente"
+                echo "Successfully ejected media."
+                exit 0
+            fi
             echo "error: The disk device 'sda' doesn't have media" >&2
             exit 1
         fi
@@ -198,13 +216,18 @@ case "$cmd" in
                     exit 0
                 fi
                 n="$(contador "$vm" llamadas_exec)"
+                codigo=0
                 if (( n <= ${MOCK_CI_RUNNING:-0} )); then
                     estado="running"
                 else
                     estado="${MOCK_CI_RESULT:-done}"
+                    case "$estado" in
+                        degraded) estado="done"; codigo=2 ;;
+                        error)    codigo=1 ;;
+                    esac
                 fi
                 datos="$(printf 'status: %s\n' "$estado" | base64 | tr -d '\n')"
-                printf '{"return":{"exited":true,"exitcode":0,"out-data":"%s"}}\n' "$datos"
+                printf '{"return":{"exited":true,"exitcode":%s,"out-data":"%s"}}\n' "$codigo" "$datos"
                 exit 0 ;;
             *guest-exec*)
                 printf '{"return":{"pid":4242}}\n'

@@ -1,0 +1,11 @@
+#!/bin/bash
+# ping simulado: responde solo a las IPs listadas en $MOCK_STATE/ping_responde
+# (una por línea). Así los tests no dependen de la red del equipo.
+S="${MOCK_STATE:?}"
+echo "ping $*" >> "$S/log"
+ip="${*: -1}"
+if [[ -f "$S/ping_responde" ]] && grep -qxF "$ip" "$S/ping_responde"; then
+    echo "64 bytes from $ip: icmp_seq=1 ttl=64 time=0.3 ms"
+    exit 0
+fi
+exit 1

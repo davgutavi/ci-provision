@@ -44,8 +44,12 @@ obtener_ip_agente() {
 # Ejecuta 'cloud-init status' dentro de la máquina a través del guest agent y
 # devuelve por stdout su estado (done, running, error, ...).
 # Devuelve 1 si no se ha podido consultar.
+#
+# Desde cloud-init 23.4 (Ubuntu 24.04), 'cloud-init status' escribe "done"
+# aunque haya terminado con avisos; lo que lo distingue es el código de salida:
+# 0 bien, 1 error, 2 terminado con avisos ("degraded"). Por eso se mira también.
 cloudinit_status() {
-    local vm="$1" r pid s exited datos i
+    local vm="$1" r pid s exited datos i estado codigo
 
     r="$(virsh qemu-agent-command "$vm" --timeout 5 \
           '{"execute":"guest-exec","arguments":{"path":"/usr/bin/cloud-init","arg":["status"],"capture-output":true}}' \
@@ -64,7 +68,12 @@ cloudinit_status() {
         exited="$(jq -r '.return.exited // empty' <<< "$s" 2>/dev/null || true)"
         if [[ "$exited" == "true" ]]; then
             datos="$( { jq -r '.return."out-data" // empty' <<< "$s" | base64 -d; } 2>/dev/null || true)"
-            awk '/^status:/ { sub(/^status: */, ""); print; exit }' <<< "$datos"
+            codigo="$(jq -r '.return.exitcode // empty' <<< "$s" 2>/dev/null || true)"
+            estado="$(awk '/^status:/ { sub(/^status: */, ""); print; exit }' <<< "$datos")"
+            if [[ "$estado" == "done" && "$codigo" == "2" ]]; then
+                estado="degraded done"
+            fi
+            printf '%s\n' "$estado"
             return 0
         fi
     done

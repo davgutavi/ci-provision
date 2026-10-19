@@ -71,8 +71,9 @@ $HOME/imagenesMV/noble-server-cloudimg-amd64.img
 ```
 
 **Si no está, el script la descarga** (unos 600 MB) la primera vez que lo
-ejecutes. Solo la guarda con ese nombre si la descarga termina bien y es una
-imagen válida.
+ejecutes. Solo la guarda con ese nombre si la descarga termina bien, coincide
+con la suma que publica Ubuntu y es una imagen válida. Si los profesores han
+dejado una copia en `/home/ssoo-shared`, la copia de allí en lugar de descargarla.
 
 Si usas `--imagen debian12` (la máquina del boletín 1), la imagen es
 **debian12.qcow2** (unos 430 MB), y también la descarga el script si falta.
@@ -172,11 +173,12 @@ De `MAQUINA` (por ejemplo `server1`) salen el nombre del dominio en libvirt
 | `--extra-disks` | Crea y conecta 6 discos extra de 40G (`vdb`..`vdg`). Ver [SERVER1 del boletín 2](#caso-server1) |
 | `--glusterfs` | Construye una imagen base GlusterFS y deja solo el disco. Ver [solo la imagen base](#caso-imagen-base) |
 | `--gluster-cluster` | Construye la infraestructura completa del boletín 2, epígrafe 2.4. Ver [infraestructura GlusterFS](#caso-cluster) |
-| `--base FICHERO` | Imagen del silo de la que hacer la copia, en lugar de la imagen cloud. Con `--gluster-cluster`, los nodos parten de ella y no se construye la base. No se combina con `--imagen`: el script deduce de qué sistema es. Ver [si ya tienes tu imagen base](#caso-base-propia) |
-| `--ssh-pass CONTRASEÑA` | Da esa contraseña a `administrador` y permite entrar por SSH escribiéndola. La eliges tú; solo caracteres ASCII. Con `--ssh-pass -` te la pide por teclado, sin que quede en el historial |
+| `--base FICHERO` | Imagen del silo de la que hacer la copia, en lugar de la imagen cloud. Con `--gluster-cluster`, los nodos parten de ella y no se construye la base. El script deduce de qué sistema es; si no lo sabe, te avisa y puedes indicarlo con `--imagen`. Ver [si ya tienes tu imagen base](#caso-base-propia) |
+| `--ssh-pass -` | Te pide una contraseña para `administrador` y permite entrar por SSH escribiéndola. Solo caracteres ASCII. También se puede escribir en la orden (`--ssh-pass CONTRASEÑA`), pero entonces la ven los demás usuarios del servidor mientras se ejecuta y queda en tu historial |
 | `--no-root` | No habilita al usuario `root` |
 | `--no-virt-viewer` | No habilita la consola gráfica. La consola de texto (`virsh console`) sigue funcionando |
 | `--limpiar` | Si ya existen los dominios o discos que el script va a crear, los elimina antes, previa confirmación. **Solo esos** |
+| `--si` | Da por contestadas que sí las confirmaciones de `--limpiar`, `--eliminar` y `--eliminar-todo`. Solo hace falta si lanzas el script sin terminal (desde otro script): entonces, sin `--si`, no elimina nada |
 | `--listar` | Muestra tus máquinas (estado, IP, discos) y los discos del silo que no usa ninguna |
 | `--eliminar MAQUINA...` | Elimina esas máquinas con sus discos y sus ficheros cloud-init, previa confirmación |
 | `--eliminar-todo` | Elimina todas tus máquinas con sus discos y ofrece borrar los discos que queden sin máquina |
@@ -208,9 +210,13 @@ El script siempre crea máquinas y discos **nuevos**. Si ya existe alguno de los
 que va a crear, se detiene y te dice cuáles son y cómo eliminarlos. Con
 `--limpiar` los elimina él, pero **únicamente esos**: nunca toca otro dominio ni
 otro fichero de tu silo. Antes de hacerlo te enseña la lista y te pide
-confirmación por teclado. Y si uno de esos discos lo está usando otra de tus
-máquinas, o es la imagen base de otras copias, no lo borra: se detiene y te lo
-explica.
+confirmación por teclado. Y si uno de esos discos lo está usando cualquier otra
+máquina del servidor, o es la imagen base de otras copias, no lo borra: se
+detiene y te lo explica. Tampoco toca una máquina que se llame como las tuyas
+pero tenga sus discos fuera de tu silo (puede ser de otro usuario).
+
+Con una IP fija, el script comprueba también que no la tenga ya otra de tus
+máquinas y que no responda nada en ella.
 
 ### 🗂️ Ver y eliminar lo que ya tienes
 
@@ -236,8 +242,9 @@ infraestructura GlusterFS entera:
 ./ci-provision.sh --eliminar server1 server2 server3 server4 gluster-base
 ```
 
-Nunca borra un disco que esté usando otra máquina, ni una imagen de la que dependan
-otras copias: en ese caso lo conserva y te dice por qué.
+Nunca borra un disco que esté usando otra máquina (tuya o no), ni una imagen de la
+que dependan otras copias que se conservan, aunque sea a través de otra copia: en
+ese caso lo conserva y te dice por qué.
 
 ```bash
 ./ci-provision.sh --eliminar-todo
@@ -286,8 +293,10 @@ lo que harían.
 ### **Permitiendo además entrar por SSH con contraseña**
 
 ```bash
-./ci-provision.sh --ssh-pass Alumno2025 server1
+./ci-provision.sh --ssh-pass - server1
 ```
+
+El script te pide la contraseña (no se ve al escribirla).
 
 ---
 
@@ -483,21 +492,22 @@ esos directorios los puedes borrar cuando quieras.
 | **10** | Faltan o sobran parámetros, opciones incompatibles, una `--imagen` que no existe o una máquina llamada como una imagen cloud | Revisa la sintaxis: `MAQUINA [IP]` |
 | **11** | Falta el valor de una opción, o está vacío | Escríbelo después de la opción, separado por un espacio |
 | **12** | Opción desconocida, obsoleta o escrita con `=` | Consulta `-h`; las opciones van separadas de su valor por un espacio |
-| **13** | RAM, vCPUs o `--discos-nodo` no válidos | Números; mínimo 512 MB y 1 vCPU; de 3 a 7 discos por nodo |
+| **13** | RAM, vCPUs, `--discos-nodo` o `--ip-inicial` no válidos | Números; mínimo 512 MB y 1 vCPU; de 3 a 7 discos por nodo; IP inicial de 2 a 250 |
 | **14** | Contraseña con caracteres no ASCII | Sin tildes ni `ñ`: no podrías teclearla en la consola |
 | **15** | Tamaño de disco no válido, o menor que la imagen de partida | Formato `40G`, `20G`, `512M`; nunca menor que la imagen |
 | **16** | Nombre de disco o de imagen no válido | Solo el nombre del fichero, sin rutas |
 | **20** | Nombre de máquina o prefijo (`--prefijo`) no válido | Solo letras, números y guiones; sin tu usuario delante |
 | **21** | Ya existe el dominio o algún disco, o un disco lo usa otra máquina | El mensaje indica cómo eliminarlos, o usa `--limpiar` |
 | **22** | No hay nada que eliminar, o no se ha podido eliminar | Comprueba el nombre con `--listar` |
+| **23** | Había que confirmar y no hay terminal para preguntar | Ejecútalo desde una terminal, o añade `--si` si de verdad quieres hacerlo sin preguntas |
 | **30** | No existe el silo | Crear `$HOME/imagenesMV` y mapearlo en el hipervisor |
 | **31** | No existe la clave pública, o el fichero no contiene una sola clave | `ssh-keygen` |
-| **37** | No se ha podido descargar la imagen base, o la que hay está corrupta | El mensaje indica el `wget` manual, o el `rm` para que el script la vuelva a descargar |
+| **37** | No se ha podido descargar la imagen base, no coincide con su suma publicada, o la que hay está corrupta | El mensaje indica el `wget` manual, o el `rm` para que el script la vuelva a descargar |
 | **38** | Faltan herramientas (incluido `wget`/`curl` para descargar la imagen, o `whiptail` para `--menu`) o no hay conexión con libvirt | Avisar al profesor |
-| **39** | La imagen indicada con `--base` no existe o no es un `qcow2`, o no está `/home/ssoo-shared/ubuntu-base.qcow2` (con `--imagen ubuntu-base`) | Revisa el nombre; debe estar en el silo. Sin ubuntu-base, usa la imagen por defecto |
+| **39** | La imagen indicada con `--base` no existe, no es un `qcow2`, le falta la imagen de la que es copia o es el disco de una máquina; o no está `/home/ssoo-shared/ubuntu-base.qcow2` (con `--imagen ubuntu-base`) | Revisa el nombre; debe estar en el silo. Sin ubuntu-base, usa la imagen por defecto |
 | **40** | No se encuentra tu red virtual, o el nombre dado a `--red` no es válido | Créala con el nombre `TU_USUARIO-red`, o usa `--red` |
 | **41** | IP no válida o fuera de tu red | El mensaje indica las IPs libres de tu red |
-| **42** | IP ocupada por DHCP o reservada | El mensaje indica las IPs libres de tu red |
+| **42** | IP ocupada: por el DHCP, por una reserva, por otra de tus máquinas o por algo que ya responde en ella | El mensaje indica las IPs libres de tu red (y, en el clúster, qué `--ip-inicial` usar) |
 | **43** | No se puede interpretar la red | Revisar `virsh net-dumpxml TU_RED` |
 | **44** | Tienes varias redes virtuales | Indica cuál con `--red` |
 | **45** | Tu red virtual está inactiva | `virsh net-start TU_RED` |
@@ -520,6 +530,7 @@ No las necesitas en los [casos de uso](#casos-de-uso).
 | `--disco NOMBRE` | Nombre del disco principal (por defecto `MAQUINA.qcow2`) |
 | `--tam TAMAÑO` | Tamaño del disco principal (por defecto `40G`, o el de la imagen de partida si es mayor) |
 | `--discos-nodo N` | Discos extra por nodo del clúster, de 3 a 7 (por defecto 3; con 7, como `crea-entorno.sh`) |
+| `--ip-inicial N` | IP del primer nodo del clúster: `.N`, `.N+1`… (por defecto 10). Solo si el DHCP de tu red ocupa las `.10`–`.13`; el script te dice qué número usar |
 | `--ram MB` | Memoria (por defecto 2048; en el clúster, 1024 por nodo) |
 | `--vcpus N` | vCPUs (por defecto 2; en el clúster, 1 por nodo) |
 

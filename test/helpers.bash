@@ -20,15 +20,16 @@ preparar_entorno() {
     # qcow2, como la real) y la ubuntu-base "del servidor", de 64G como la real
     qemu-img create -f qcow2 "$SILO/noble-server-cloudimg-amd64.img" 3G >/dev/null
     qemu-img create -f qcow2 "$SILO/debian12.qcow2" 3G >/dev/null
-    mkdir -p "$BATS_TEST_TMPDIR/ssoo-shared"
-    export UBUNTU_BASE_COMPARTIDA="$BATS_TEST_TMPDIR/ssoo-shared/ubuntu-base.qcow2"
+    export CI_PROVISION_DIR_COMPARTIDO="$BATS_TEST_TMPDIR/ssoo-shared"
+    UBUNTU_BASE_COMPARTIDA="$CI_PROVISION_DIR_COMPARTIDO/ubuntu-base.qcow2"
+    mkdir -p "$CI_PROVISION_DIR_COMPARTIDO"
     qemu-img create -f qcow2 "$UBUNTU_BASE_COMPARTIDA" 64G >/dev/null
 
     # Esperas cortas para que los tests no tarden
-    export WAIT_TIMEOUT=15
-    export POLL_SECS=1
-    export GRACE_SECS=1
-    export SHUTDOWN_TIMEOUT=5
+    export CI_PROVISION_WAIT_TIMEOUT=15
+    export CI_PROVISION_POLL_SECS=1
+    export CI_PROVISION_GRACE_SECS=1
+    export CI_PROVISION_SHUTDOWN_TIMEOUT=5
 
     # Red del usuario, conforme al manual
     definir_red "${USUARIO}-red" 192.168.7.1 255.255.255.0 192.168.7.128 192.168.7.254
@@ -57,6 +58,17 @@ definir_red() {
         echo "</network>"
     } > "$MOCK_STATE/red-$nombre.xml"
     echo "$nombre" >> "$MOCK_STATE/redes.txt"
+}
+
+# Un dominio que no ha creado el script (a mano, de otro usuario...)
+# definir_dominio NOMBRE ESTADO DISCO...
+definir_dominio() {
+    local nombre="$1" estado="$2"
+    shift 2
+    mkdir -p "$MOCK_STATE/dominios/$nombre"
+    echo "$estado" > "$MOCK_STATE/dominios/$nombre/estado"
+    printf '%s\n' "$@" > "$MOCK_STATE/dominios/$nombre/discos"
+    echo "192.168.7.99" > "$MOCK_STATE/dominios/$nombre/ip"
 }
 
 quitar_red() {

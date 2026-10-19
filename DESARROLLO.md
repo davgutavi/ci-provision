@@ -52,8 +52,18 @@ test_helper/bats-core/bin/bats test/
 ```
 
 Necesitan `qemu-img` y `jq` (en macOS: `brew install qemu jq`). En el silo de
-mentira están ya las dos imágenes cloud (pequeñas) y una `ubuntu-base.qcow2` de
-64G vacía, a la que apunta `UBUNTU_BASE_COMPARTIDA`.
+mentira están ya las dos imágenes cloud (pequeñas), y en un directorio
+compartido de mentira (`CI_PROVISION_DIR_COMPARTIDO`) una `ubuntu-base.qcow2`
+de 64G vacía. También hay mocks de `ping` (responde a las IPs de
+`$MOCK_STATE/ping_responde`) y de las sumas de las descargas, y la función
+`definir_dominio` de `test/helpers.bash` crea máquinas "ajenas" (hechas a mano,
+de otro usuario) para probar que el script no las toca.
+
+Variables de entorno que lee el script (solo para pruebas y desarrollo; todas
+con el prefijo `CI_PROVISION_` para no recoger por accidente las de un alumno):
+`CI_PROVISION_WAIT_TIMEOUT`, `_POLL_SECS`, `_GRACE_SECS`, `_SHUTDOWN_TIMEOUT`,
+`_DIR_COMPARTIDO`, `_PUBKEY`, `_LIBVIRT_URI` y, internamente entre el asistente
+y el proceso que lanza, `_SSH_PASS`.
 
 Los simuladores admiten variables de entorno para provocar situaciones
 concretas (el agente que tarda en responder, cloud-init que falla, la descarga
@@ -106,6 +116,19 @@ Cada ejecución deja un log completo en el silo (`pruebas-servidor-FECHA.log`).
   que salga antes de tiempo: el productor muere con SIGPIPE y el script entero
   aborta. Recoge la salida en una variable y filtra con un here-string.
 - `qemu-img info` sobre el disco de una máquina en ejecución necesita `-U`.
+- El script fija `LIBVIRT_DEFAULT_URI=qemu:///system`: sin sesión de login, o
+  con la variable heredada (el libvirt de Homebrew pone `qemu:///session`),
+  virsh no vería las máquinas y todo parecería suelto.
+- Las confirmaciones (`confirmar`) no se dan por buenas sin terminal: hace
+  falta `--si` (error 23). La batería lo pasa siempre.
+- Qué se puede borrar lo decide `filtrar_borrables` (limpieza.sh), común a
+  `--limpiar`, `--eliminar` y `--eliminar-todo`: nunca un disco de cualquier
+  dominio del servidor que no se elimine, ni una imagen de la que dependa (por
+  una cadena de cualquier longitud) una copia que se conserva, ni una imagen
+  cloud. El mapa de respaldos se lee una vez (`cargar_respaldos`); cargarlo
+  dentro de `$(...)` no sirve, porque se pierde al salir de la subshell.
+- Un dominio solo se trata como del alumno si sus discos están en el silo
+  (`dominio_en_silo`): los nombres de dominio son de todo el servidor.
 - `virsh change-media --eject` con `--live --config` a la vez falla en cuanto
   una de las dos definiciones ya está limpia; se hacen por separado y se
   decide por el estado final.

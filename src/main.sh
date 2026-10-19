@@ -13,6 +13,13 @@ esac
 # configurado en el servidor.
 export LC_ALL=C
 
+# Las máquinas de la asignatura son las de libvirt del sistema. Sin una sesión
+# de login (p.ej. 'ssh servidor ./ci-provision.sh ...'), o con una variable
+# LIBVIRT_DEFAULT_URI heredada, virsh podría conectarse a qemu:///session, no
+# ver ninguna máquina y dar todos los discos por sueltos. Por eso se fija
+# siempre; solo para desarrollo se puede cambiar con CI_PROVISION_LIBVIRT_URI.
+export LIBVIRT_DEFAULT_URI="${CI_PROVISION_LIBVIRT_URI:-qemu:///system}"
+
 VERSION="3.0.0"
 
 ########################################
@@ -35,8 +42,14 @@ IMAGEN_NOBLE="noble-server-cloudimg-amd64.img"
 URL_NOBLE="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 IMAGEN_DEBIAN="debian12.qcow2"
 URL_DEBIAN="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
-# Se puede cambiar desde el entorno; los tests lo usan para no depender del servidor
-UBUNTU_BASE_COMPARTIDA="${UBUNTU_BASE_COMPARTIDA:-/home/ssoo-shared/ubuntu-base.qcow2}"
+# Sumas publicadas junto a cada imagen, para comprobar la descarga
+SUMAS_NOBLE="https://cloud-images.ubuntu.com/noble/current/SHA256SUMS"
+SUMAS_DEBIAN="https://cloud.debian.org/images/cloud/bookworm/latest/SHA512SUMS"
+# Directorio compartido de los profesores: ubuntu-base.qcow2 y, si están ahí,
+# copias de las imágenes cloud (se copian en vez de descargarlas). Se puede
+# cambiar desde el entorno; los tests lo usan para no depender del servidor.
+DIR_COMPARTIDO="${CI_PROVISION_DIR_COMPARTIDO:-/home/ssoo-shared}"
+UBUNTU_BASE_COMPARTIDA="$DIR_COMPARTIDO/ubuntu-base.qcow2"
 IMAGEN_DEFECTO="noble"                # máquinas sueltas
 IMAGEN_DEFECTO_GLUSTER="noble"        # --glusterfs y --gluster-cluster
 
@@ -44,6 +57,7 @@ IMAGEN_DEFECTO_GLUSTER="noble"        # --glusterfs y --gluster-cluster
 IMAGEN=""          # noble | debian12 | ubuntu-base
 BASE_IMG=""        # fichero del que sale el disco principal
 BASE_IMG_URL=""    # de dónde se descarga si falta (vacío: no se descarga)
+BASE_IMG_SUMAS=""  # fichero de sumas publicado junto a la imagen
 OS_VARIANT=""      # variante de SO que se declara a virt-install
 
 # Usuario del servidor: de él salen los nombres de los dominios y el de la red
@@ -62,7 +76,7 @@ UNIDADES_EXTRA=(vdb vdc vdd vde vdf vdg)          # --extra-disks (boletín 2, e
 # Clúster GlusterFS (boletín 2, epígrafe 2.4)
 CLUSTER_BASE="gluster-base"
 CLUSTER_NODOS=(server1 server2 server3 server4)
-CLUSTER_IP_INICIAL=10                             # server1 = .10, server2 = .11, ...
+CLUSTER_IP_INICIAL=10                             # server1 = .10, server2 = .11, ... (--ip-inicial)
 CLUSTER_RAM_MB=1024                               # recursos por nodo: los mismos que
 CLUSTER_VCPUS=1                                   # usa crea-entorno.sh
 CLUSTER_MONTAJES=(/gluster1 /gluster2 /gluster3)  # vdb, vdc y vdd, formateados en xfs
@@ -79,11 +93,13 @@ VCPUS_DEFECTO=2
 RAM_MB_MINIMO=512
 
 # Espera a que cloud-init termine (segundos). Se pueden ajustar desde el
-# entorno; los tests lo usan para no esperar de verdad.
-WAIT_TIMEOUT="${WAIT_TIMEOUT:-300}"          # máximo antes de rendirse
-POLL_SECS="${POLL_SECS:-3}"                  # cada cuánto se consulta
-GRACE_SECS="${GRACE_SECS:-5}"                # margen si no se puede consultar cloud-init
-SHUTDOWN_TIMEOUT="${SHUTDOWN_TIMEOUT:-120}"  # apagado limpio de la base del clúster
+# entorno (con nombres propios, para no recoger por accidente variables del
+# alumno); los tests lo usan para no esperar de verdad. Se validan en
+# validar_opciones.
+WAIT_TIMEOUT="${CI_PROVISION_WAIT_TIMEOUT:-300}"          # máximo antes de rendirse
+POLL_SECS="${CI_PROVISION_POLL_SECS:-3}"                  # cada cuánto se consulta
+GRACE_SECS="${CI_PROVISION_GRACE_SECS:-5}"                # margen si no se puede consultar cloud-init
+SHUTDOWN_TIMEOUT="${CI_PROVISION_SHUTDOWN_TIMEOUT:-120}"  # apagado limpio de la base del clúster
 
 ########################################
 # Opciones (valores por defecto)
@@ -98,6 +114,7 @@ LISTAR=false        # --listar
 ELIMINAR=false      # --eliminar MAQUINA...
 ELIMINAR_TODO=false # --eliminar-todo
 MENU=false          # --menu: asistente con whiptail
+SI=false            # --si: da por contestadas que sí las confirmaciones
 NOMBRES=()          # --eliminar: máquinas a eliminar
 
 RED_OPT=""
@@ -106,6 +123,7 @@ TAM_DISCO="$TAM_DISCO_DEFECTO"
 TAM_EXPLICITO=false  # --tam: si no se indica, el disco crece hasta el tamaño de la imagen
 IMAGEN_OPT=""        # --imagen
 DISCOS_NODO_OPT=""   # --discos-nodo
+IP_INICIAL_OPT=""    # --ip-inicial
 RAM_OPT=""
 VCPUS_OPT=""
 SSH_PASS=""
@@ -144,6 +162,7 @@ BASE_IMG_FALTA=false
 ########################################
 DOMINIOS_CREADOS=()
 DISCOS_CREADOS=()
+DIRS_CREADOS=()          # directorios cloud-init nuevos de esta ejecución
 BASE_CONSERVADA=""       # imagen base GlusterFS ya terminada: no se deshace aunque falle lo siguiente
 CREACION_COMPLETA=false   # true cuando ya solo queda esperar: a partir de ahí no se deshace nada
 SALIDA_CONTROLADA=false   # true si se sale por un error propio (validaciones)
@@ -158,6 +177,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/cloudinit.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/discos.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/espera.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/cluster.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/gestion.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/asistente.sh"
 
 ########################################
 # Función de error con código
@@ -202,6 +223,10 @@ revertir_cambios() {
             echo "  - disco '$disco' eliminado" >&2
         fi
     done
+    local dir
+    for dir in ${DIRS_CREADOS[@]+"${DIRS_CREADOS[@]}"}; do
+        [[ -d "$dir" ]] && rm -rf "$dir" && echo "  - ficheros cloud-init '$dir' eliminados" >&2
+    done
     if [[ -n "$BASE_CONSERVADA" && -e "$BASE_CONSERVADA" ]]; then
         echo "  - la imagen base $(basename "$BASE_CONSERVADA") ya estaba terminada y se conserva:" >&2
         echo "    puedes reutilizarla con --base $(basename "$BASE_CONSERVADA")" >&2
@@ -232,6 +257,10 @@ al_salir() {
     if $CREACION_COMPLETA; then
         echo "Lo creado se conserva: no se deshace nada. Comprueba su estado con:" >&2
         echo "  virsh list --all" >&2
+        if $INTERRUMPIDO; then
+            echo "OJO: no se ha expulsado el medio de cloud-init. Antes de tomar instantáneas," >&2
+            echo "     apaga la máquina (virsh shutdown) o espera a que termine y expúlsalo." >&2
+        fi
     else
         revertir_cambios
     fi
@@ -271,16 +300,18 @@ Opciones:
                          noble        Ubuntu 24.04, $IMAGEN_NOBLE (por defecto,
                                       también para la base GlusterFS)
                          debian12     Debian 12, $IMAGEN_DEBIAN (la del boletín 1)
-                         ubuntu-base  la imagen del boletín 1 de $(dirname "$UBUNTU_BASE_COMPARTIDA");
+                         ubuntu-base  la imagen del boletín 1 de $DIR_COMPARTIDO;
                                       solo para la base GlusterFS, como en la construcción
                                       manual del boletín 2
                        Las dos primeras se descargan al silo si no están.
+                       Con --base, indica de qué imagen sale ese fichero si el script
+                       no sabe deducirlo (te lo avisa).
   --glusterfs          Construye una imagen base GlusterFS: crea la máquina con
                        glusterfs-server instalado, glusterd habilitado y el
                        machine-id vacío y, al terminar, la apaga y elimina el
                        dominio. Queda solo MAQUINA.qcow2, listo para hacer copias.
                        Con ubuntu-base, MAQUINA.qcow2 es una copia completa de esa
-                       imagen (no depende del fichero de $(dirname "$UBUNTU_BASE_COMPARTIDA")).
+                       imagen (no depende del fichero de $DIR_COMPARTIDO).
   --gluster-cluster    Construye la infraestructura completa del epígrafe 2.4 del
                        boletín 2: la base anterior (${CLUSTER_BASE}.qcow2) y ${#CLUSTER_NODOS[@]} nodos
                        (${CLUSTER_NODOS[*]}) con IP fija, /etc/hosts, ${DISCOS_NODO_DEFECTO} discos
@@ -288,10 +319,11 @@ Opciones:
   --discos-nodo N      Discos extra por nodo del clúster, de ${DISCOS_NODO_DEFECTO} a ${#UNIDADES_POSIBLES_NODO[@]} (por defecto
                        ${DISCOS_NODO_DEFECTO}, como el boletín; con ${#UNIDADES_POSIBLES_NODO[@]}, como crea-entorno.sh). Solo los
                        tres primeros se formatean y se montan.
+  --ip-inicial N       Último número de la IP del primer nodo del clúster (por defecto
+                       ${CLUSTER_IP_INICIAL}: .${CLUSTER_IP_INICIAL} a .$(( CLUSTER_IP_INICIAL + ${#CLUSTER_NODOS[@]} - 1 ))). Útil si el DHCP de tu red las ocupa.
   --base FICHERO       Imagen del silo de la que hacer la copia COW (p.ej. una
                        imagen base GlusterFS que ya tengas). Con --gluster-cluster
-                       se omite la fase 1 y los nodos parten de ella. El tipo de
-                       imagen se deduce de ella, así que no se combina con --imagen.
+                       se omite la fase 1 y los nodos parten de ella.
   --no-root            No habilita al usuario root (queda sin contraseña, como en
                        las máquinas que se crean a mano)
   --no-virt-viewer     No habilita la consola gráfica (virt-viewer). La consola de
@@ -299,6 +331,9 @@ Opciones:
   --limpiar            Si ya existen los dominios o discos que el script va a
                        crear, los elimina antes (solo esos; nada más), previa
                        confirmación
+  --si                 Da por contestadas que sí las confirmaciones de --limpiar,
+                       --eliminar y --eliminar-todo. Sin terminal (p.ej. desde otro
+                       script) son obligatorias: sin --si no se elimina nada.
   --red NOMBRE         Red virtual a usar (por defecto se busca ${USUARIO}-red)
   --prefijo PREFIJO    Sustituye a tu usuario en los nombres: dominio PREFIJO-MAQUINA
                        y, en ese caso, también los discos (PREFIJO-MAQUINA.qcow2)
@@ -310,8 +345,9 @@ Opciones:
   --ssh-pass CONTRASEÑA
                        Da esa contraseña a 'administrador' y permite entrar por SSH
                        escribiéndola (sin --ssh-pass, por SSH solo se entra con tu
-                       clave pública). Solo caracteres ASCII. Con '--ssh-pass -' se
-                       pide por teclado y no queda en el historial.
+                       clave pública). Solo caracteres ASCII. Mejor '--ssh-pass -':
+                       te la pide por teclado y no la ven los demás usuarios del
+                       servidor ni queda en el historial.
   --dry-run            Comprueba los datos y muestra lo que se haría, SIN crear nada
   --no-wait            No esperar a que cloud-init termine de configurar la máquina
                        (en el clúster solo afecta a los nodos: la base se espera siempre)
@@ -370,6 +406,7 @@ parse_args() {
             --no-wait)         NO_WAIT=true;     shift ;;
             --no-root)         NO_ROOT=true;     shift ;;
             --no-virt-viewer)  NO_GRAFICOS=true; shift ;;
+            --si)              SI=true;          shift ;;
             --listar)          LISTAR=true;        shift ;;
             --eliminar)        ELIMINAR=true;      shift ;;
             --eliminar-todo)   ELIMINAR_TODO=true; shift ;;
@@ -378,7 +415,7 @@ parse_args() {
                 echo "ci-provision.sh $VERSION"
                 exit 0
                 ;;
-            --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass|--prefijo|--imagen|--discos-nodo)
+            --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass|--prefijo|--imagen|--discos-nodo|--ip-inicial)
                 if [[ $# -lt 2 || "$2" == --* ]]; then
                     error 11 "Falta el valor de la opción $1. Escríbelo a continuación, separado por un espacio: $1 VALOR"
                 fi
@@ -386,16 +423,17 @@ parse_args() {
                     error 11 "La opción $1 no admite un valor vacío."
                 fi
                 case "$1" in
-                    --red)      RED_OPT="$2"   ;;
-                    --disco)    DISCO_OPT="$2" ;;
-                    --base)     BASE_OPT="$2"  ;;
-                    --tam)      TAM_DISCO="$2"; TAM_EXPLICITO=true ;;
-                    --imagen)   IMAGEN_OPT="$2" ;;
-                    --discos-nodo) DISCOS_NODO_OPT="$2" ;;
-                    --ram)      RAM_OPT="$2"   ;;
-                    --vcpus)    VCPUS_OPT="$2" ;;
-                    --ssh-pass) SSH_PASS="$2"  ;;
-                    --prefijo)  PREFIJO_OPT="$2" ;;
+                    --red)          RED_OPT="$2"   ;;
+                    --disco)        DISCO_OPT="$2" ;;
+                    --base)         BASE_OPT="$2"  ;;
+                    --tam)          TAM_DISCO="$2"; TAM_EXPLICITO=true ;;
+                    --imagen)       IMAGEN_OPT="$2" ;;
+                    --discos-nodo)  DISCOS_NODO_OPT="$2" ;;
+                    --ip-inicial)   IP_INICIAL_OPT="$2" ;;
+                    --ram)          RAM_OPT="$2"   ;;
+                    --vcpus)        VCPUS_OPT="$2" ;;
+                    --ssh-pass)     SSH_PASS="$2"  ;;
+                    --prefijo)      PREFIJO_OPT="$2" ;;
                 esac
                 shift 2
                 ;;
@@ -411,8 +449,8 @@ parse_args() {
                 error 12 "La opción --virt-viewer ya no existe: la consola gráfica está activa de forma predeterminada; usa --no-virt-viewer si no la quieres."
                 ;;
             --user-pass)
-                error 12 "La opción --user-pass ha sido sustituida por --ssh-pass CONTRASEÑA.
-Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y por SSH se entra con clave."
+                error 12 "La opción --user-pass ha sido sustituida por --ssh-pass CONTRASEÑA (o '--ssh-pass -' para escribirla por teclado).
+Sin ella, 'administrador' no tiene contraseña y por SSH se entra con tu clave; por consola entra root (contraseña ${PASS_CONSOLA})."
                 ;;
             --)
                 shift
@@ -432,29 +470,48 @@ Sin ella, 'administrador' ya tiene contraseña de consola (${PASS_CONSOLA}) y po
         esac
     done
 
-    ########################################
-    # Parámetros posicionales
-    ########################################
     # --ssh-pass -: la contraseña se pide por teclado, para que no quede en el
-    # historial ni la vean otros usuarios del servidor en 'ps'
+    # historial ni la vean otros usuarios del servidor en 'ps'. El asistente,
+    # que ya la ha pedido, la pasa por el entorno (que solo puede leer el
+    # propio usuario) en lugar de en la línea de órdenes.
     if [[ "$SSH_PASS" == "-" ]]; then
-        if [[ ! -t 0 ]]; then
+        if [[ -n "${CI_PROVISION_SSH_PASS:-}" ]]; then
+            SSH_PASS="$CI_PROVISION_SSH_PASS"
+            unset CI_PROVISION_SSH_PASS
+        elif [[ ! -t 0 ]]; then
             error 11 "Con '--ssh-pass -' la contraseña se pide por teclado, y aquí no hay terminal."
-        fi
-        read -r -s -p "Contraseña para administrador: " SSH_PASS || SSH_PASS=""
-        echo
-        if [[ -z "$SSH_PASS" ]]; then
-            error 11 "La contraseña no puede estar vacía."
+        else
+            read -r -s -p "Contraseña para administrador: " SSH_PASS || SSH_PASS=""
+            echo
+            if [[ -z "$SSH_PASS" ]]; then
+                error 11 "La contraseña no puede estar vacía."
+            fi
         fi
     fi
+}
 
+# Número entero positivo escrito en decimal, sin que los ceros a la izquierda
+# lo conviertan en octal (bash leería 08 como un error y 010 como 8).
+# Imprime el número normalizado; devuelve 1 si no es un número.
+decimal() {   # TEXTO
+    [[ "$1" =~ ^[0-9]+$ ]] || return 1
+    printf '%s' "$(( 10#$1 ))"
 }
 
 # Comprobaciones de las opciones ya leídas: modos, parámetros y valores
 validar_opciones() {
-    ########################################
-    # Modos de gestión: --listar, --eliminar, --eliminar-todo
-    ########################################
+    validar_modos
+    if $CLUSTER; then
+        validar_cluster
+    elif ! $LISTAR && ! $ELIMINAR && ! $ELIMINAR_TODO && ! $MENU; then
+        validar_maquina
+    fi
+    validar_valores
+    validar_entorno_numerico
+}
+
+# Modos: --gluster-cluster, --listar, --eliminar, --eliminar-todo, --menu
+validar_modos() {
     local modos=0 m
     for m in $CLUSTER $LISTAR $ELIMINAR $ELIMINAR_TODO $MENU; do
         if [[ "$m" == true ]]; then modos=$(( modos + 1 )); fi
@@ -464,8 +521,8 @@ validar_opciones() {
     fi
     if $LISTAR || $ELIMINAR || $ELIMINAR_TODO || $MENU; then
         if $EXTRA_DISKS || $GLUSTERFS || $LIMPIAR || $NO_WAIT || $NO_ROOT || $NO_GRAFICOS || $TAM_EXPLICITO || \
-           [[ -n "$RED_OPT$DISCO_OPT$BASE_OPT$RAM_OPT$VCPUS_OPT$SSH_PASS$IMAGEN_OPT$DISCOS_NODO_OPT" ]]; then
-            error 10 "Con --listar, --eliminar, --eliminar-todo y --menu solo se admiten --prefijo y --dry-run."
+           [[ -n "$RED_OPT$DISCO_OPT$BASE_OPT$RAM_OPT$VCPUS_OPT$SSH_PASS$IMAGEN_OPT$DISCOS_NODO_OPT$IP_INICIAL_OPT" ]]; then
+            error 10 "Con --listar, --eliminar, --eliminar-todo y --menu solo se admiten --prefijo, --dry-run y --si."
         fi
         if $ELIMINAR; then
             if (( ${#ARGS[@]} == 0 )); then
@@ -473,14 +530,8 @@ validar_opciones() {
 (p.ej. $0 --eliminar server1). Para ver las que tienes: $0 --listar"
             fi
             NOMBRES=( "${ARGS[@]}" )
-            local pref="${PREFIJO_OPT:-$USUARIO}"
             for m in "${NOMBRES[@]}"; do
-                if ! [[ "$m" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
-                    error 20 "El nombre de máquina '$m' no es válido. Solo letras, números y guiones (p.ej. server1)."
-                fi
-                if [[ "${m,,}" == "${pref,,}-"* ]]; then
-                    error 20 "Indica solo el nombre corto de la máquina, sin '$pref-' delante: '${m#"${m%%-*}-"}' en vez de '$m'."
-                fi
+                validar_nombre_corto "$m"
             done
         elif (( ${#ARGS[@]} > 0 )); then
             error 10 "--listar, --eliminar-todo y --menu no llevan MAQUINA (sobra: '${ARGS[*]}')."
@@ -491,66 +542,83 @@ validar_opciones() {
         error 10 "--no-wait no se puede combinar con --glusterfs: la base hay que apagarla
 cuando cloud-init termine, así que es imprescindible esperar."
     fi
+    if [[ -n "$DISCOS_NODO_OPT" ]] && ! $CLUSTER; then
+        error 10 "--discos-nodo solo se aplica a --gluster-cluster. En una máquina suelta, usa --extra-disks."
+    fi
+    if [[ -n "$IP_INICIAL_OPT" ]] && ! $CLUSTER; then
+        error 10 "--ip-inicial solo se aplica a --gluster-cluster. En una máquina suelta, indica la IP después del nombre."
+    fi
+}
 
-    if $CLUSTER; then
-        if (( ${#ARGS[@]} > 0 )); then
-            error 10 "Con --gluster-cluster no se indica MAQUINA ni IP: los nombres (${CLUSTER_BASE}, ${CLUSTER_NODOS[*]}) y las IPs (.${CLUSTER_IP_INICIAL} en adelante) son fijos."
-        fi
-        if [[ -n "$DISCO_OPT" ]]; then
-            error 10 "La opción --disco no se aplica a --gluster-cluster: los discos se llaman como los nodos."
-        fi
-        if $GLUSTERFS || $EXTRA_DISKS; then
-            error 10 "--gluster-cluster ya construye la imagen base y los discos de cada nodo:
+# Nombre corto de una máquina: válido como hostname y sin el usuario (o el
+# prefijo) delante, que lo antepone el script: 'usuario-server1' daría
+# 'usuario-usuario-server1', que nadie quiere
+validar_nombre_corto() {   # NOMBRE
+    local m="$1" pref="${PREFIJO_OPT:-$USUARIO}"
+    if ! [[ "$m" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || (( ${#m} > 63 )); then
+        error 20 "El nombre de máquina '$m' no es válido.
+Solo letras, números y guiones, empezando por letra o número (p.ej. server1, gluster-base)."
+    fi
+    if [[ "${m,,}" == "${pref,,}-"* ]]; then
+        error 20 "El nombre de máquina '$m' ya empieza por '$pref-': el dominio sería '${pref}-${m}'.
+Indica solo el nombre corto (p.ej. '${m#"${m%%-*}-"}'); '$pref-' lo antepone el script."
+    fi
+}
+
+validar_cluster() {
+    if (( ${#ARGS[@]} > 0 )); then
+        error 10 "Con --gluster-cluster no se indica MAQUINA ni IP: los nombres (${CLUSTER_BASE}, ${CLUSTER_NODOS[*]}) son fijos
+y las IPs van de la .${CLUSTER_IP_INICIAL} en adelante (cámbialo con --ip-inicial N)."
+    fi
+    if [[ -n "$DISCO_OPT" ]]; then
+        error 10 "La opción --disco no se aplica a --gluster-cluster: los discos se llaman como los nodos."
+    fi
+    if $GLUSTERFS || $EXTRA_DISKS; then
+        error 10 "--gluster-cluster ya construye la imagen base y los discos de cada nodo:
 no se combina con --glusterfs ni con --extra-disks."
+    fi
+    if [[ -n "$IP_INICIAL_OPT" ]]; then
+        local n
+        if ! n="$(decimal "$IP_INICIAL_OPT")" || (( n < 2 || n > 250 )); then
+            error 13 "La IP inicial '$IP_INICIAL_OPT' no es válida: indica el último número de la IP del primer nodo (de 2 a 250)."
         fi
-    elif $LISTAR || $ELIMINAR || $ELIMINAR_TODO || $MENU; then
-        :
-    else
-        if (( ${#ARGS[@]} == 0 )); then
-            error 10 "Falta el nombre de la máquina.
+        CLUSTER_IP_INICIAL="$n"
+    fi
+}
+
+validar_maquina() {
+    if (( ${#ARGS[@]} == 0 )); then
+        error 10 "Falta el nombre de la máquina.
 Uso: $0 [opciones] MAQUINA [IP]      (p.ej. $0 server1)
 Consulta la ayuda con -h. En el servidor de la asignatura también puedes
 ejecutarlo sin argumentos desde una terminal: se abre un asistente con menús."
-        fi
-        if (( ${#ARGS[@]} > 2 )); then
-            error 10 "Sobran parámetros: '${ARGS[*]}'.
+    fi
+    if (( ${#ARGS[@]} > 2 )); then
+        error 10 "Sobran parámetros: '${ARGS[*]}'.
 Parece la sintaxis de la versión anterior. Ahora solo se indica el nombre corto
 de la máquina y, opcionalmente, la IP; el disco y la red se deducen de tu usuario:
   $0 [opciones] MAQUINA [IP]      (p.ej. $0 --extra-disks server1 192.168.XXX.2)
 Consulta la ayuda con -h."
-        fi
-        MAQUINA="${ARGS[0]}"
-        IP="${ARGS[1]:-}"
+    fi
+    MAQUINA="${ARGS[0]}"
+    IP="${ARGS[1]:-}"
+    validar_nombre_corto "$MAQUINA"
 
-        # De MAQUINA sale el hostname, así que solo se admiten caracteres válidos
-        # en un nombre de host
-        if ! [[ "$MAQUINA" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || (( ${#MAQUINA} > 63 )); then
-            error 20 "El nombre de máquina '$MAQUINA' no es válido.
-Solo letras, números y guiones, empezando por letra o número (p.ej. server1, gluster-base)."
-        fi
-
-        # El usuario (o el prefijo) lo antepone el script: 'usuario-server1'
-        # daría 'usuario-usuario-server1', que nadie quiere
-        local pref="${PREFIJO_OPT:-$USUARIO}"
-        if [[ "${MAQUINA,,}" == "${pref,,}-"* ]]; then
-            error 20 "El nombre de máquina '$MAQUINA' ya empieza por '$pref-': el dominio sería '${pref}-${MAQUINA}'.
-Indica solo el nombre corto (p.ej. '${MAQUINA#"${MAQUINA%%-*}-"}'); '$pref-' lo antepone el script."
-        fi
-
-        if $GLUSTERFS && $EXTRA_DISKS; then
-            error 10 "--extra-disks no se combina con --glusterfs: la imagen base es un solo disco,
+    if $GLUSTERFS && $EXTRA_DISKS; then
+        error 10 "--extra-disks no se combina con --glusterfs: la imagen base es un solo disco,
 que es lo único que queda al terminar. Los discos extra se crean al hacer las copias
 (p.ej. --gluster-cluster, o --extra-disks --base ${MAQUINA}.qcow2 server1)."
-        fi
-        if $GLUSTERFS && [[ -n "$IP" ]]; then
-            error 10 "Con --glusterfs no se indica IP: la máquina es provisional (se elimina al terminar)
-y la IP la reciben las copias que hagas de ${MAQUINA}.qcow2."
-        fi
     fi
+    if $GLUSTERFS && [[ -n "$IP" ]]; then
+        error 10 "Con --glusterfs no se indica IP: la máquina es provisional (se elimina al terminar)
+y la IP la reciben las copias que hagas de ${MAQUINA}.qcow2."
+    fi
+}
 
-    ########################################
-    # Recursos: por defecto según el modo
-    ########################################
+# Valores de las opciones: recursos, tamaños, nombres, imagen, discos por nodo
+validar_valores() {
+    local n
+
     if $CLUSTER; then
         RAM_MB="${RAM_OPT:-$CLUSTER_RAM_MB}"
         VCPUS="${VCPUS_OPT:-$CLUSTER_VCPUS}"
@@ -558,19 +626,20 @@ y la IP la reciben las copias que hagas de ${MAQUINA}.qcow2."
         RAM_MB="${RAM_OPT:-$RAM_MB_DEFECTO}"
         VCPUS="${VCPUS_OPT:-$VCPUS_DEFECTO}"
     fi
-
-    if ! [[ "$RAM_MB" =~ ^[0-9]+$ ]] || (( RAM_MB < RAM_MB_MINIMO )); then
+    if ! n="$(decimal "$RAM_MB")" || (( n < RAM_MB_MINIMO )); then
         error 13 "La memoria RAM '$RAM_MB' no es válida. Debe ser un número de MB igual o mayor que ${RAM_MB_MINIMO}."
     fi
-
-    if ! [[ "$VCPUS" =~ ^[0-9]+$ ]] || (( VCPUS < 1 )); then
+    RAM_MB="$n"
+    if ! n="$(decimal "$VCPUS")" || (( n < 1 )); then
         error 13 "El número de vCPUs '$VCPUS' no es válido. Debe ser un número igual o mayor que 1."
     fi
+    VCPUS="$n"
 
     TAM_DISCO="${TAM_DISCO^^}"
-    if ! [[ "$TAM_DISCO" =~ ^[0-9]+[MGT]$ ]]; then
+    if ! [[ "$TAM_DISCO" =~ ^[0-9]+[MGT]$ ]] || (( 10#${TAM_DISCO%?} == 0 )); then
         error 15 "El tamaño de disco '$TAM_DISCO' no es válido. Indícalo como 40G, 20G, 512M..."
     fi
+    TAM_DISCO="$(( 10#${TAM_DISCO%?} ))${TAM_DISCO: -1}"
 
     if [[ -n "$RED_OPT" ]] && ! [[ "$RED_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
         error 40 "El nombre de red '$RED_OPT' no es válido. Consulta tus redes con: virsh net-list --all"
@@ -580,24 +649,14 @@ y la IP la reciben las copias que hagas de ${MAQUINA}.qcow2."
         error 16 "El nombre de disco '$DISCO_OPT' no es válido. Indica solo el nombre del fichero (sin rutas), p.ej. server1.qcow2."
     fi
 
-    if [[ -n "$BASE_OPT" ]]; then
-        if ! [[ "$BASE_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-            error 16 "El nombre de imagen '$BASE_OPT' (--base) no es válido. Indica solo el nombre del fichero del silo (sin rutas), p.ej. gluster-base.qcow2."
-        fi
-        if [[ -n "$IMAGEN_OPT" ]]; then
-            error 10 "--imagen y --base no se combinan: con --base la máquina sale de ese fichero,
-y el tipo de imagen se deduce de él."
-        fi
+    if [[ -n "$BASE_OPT" ]] && ! [[ "$BASE_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        error 16 "El nombre de imagen '$BASE_OPT' (--base) no es válido. Indica solo el nombre del fichero del silo (sin rutas), p.ej. gluster-base.qcow2."
     fi
     elegir_imagen
 
-    # Discos por nodo del clúster
-    if [[ -n "$DISCOS_NODO_OPT" ]] && ! $CLUSTER; then
-        error 10 "--discos-nodo solo se aplica a --gluster-cluster. En una máquina suelta, usa --extra-disks."
-    fi
-    local n="${DISCOS_NODO_OPT:-$DISCOS_NODO_DEFECTO}"
-    if ! [[ "$n" =~ ^[0-9]+$ ]] || (( n < ${#CLUSTER_MONTAJES[@]} || n > ${#UNIDADES_POSIBLES_NODO[@]} )); then
-        error 13 "El número de discos por nodo '$n' no es válido. Debe estar entre ${#CLUSTER_MONTAJES[@]} (los que se montan
+    n="${DISCOS_NODO_OPT:-$DISCOS_NODO_DEFECTO}"
+    if ! n="$(decimal "$n")" || (( n < ${#CLUSTER_MONTAJES[@]} || n > ${#UNIDADES_POSIBLES_NODO[@]} )); then
+        error 13 "El número de discos por nodo '$DISCOS_NODO_OPT' no es válido. Debe estar entre ${#CLUSTER_MONTAJES[@]} (los que se montan
 en ${CLUSTER_MONTAJES[*]}) y ${#UNIDADES_POSIBLES_NODO[@]} (vdb..vdh, como crea-entorno.sh)."
     fi
     UNIDADES_CLUSTER=( "${UNIDADES_POSIBLES_NODO[@]:0:$n}" )
@@ -614,24 +673,37 @@ en ${CLUSTER_MONTAJES[*]}) y ${#UNIDADES_POSIBLES_NODO[@]} (vdb..vdh, como crea-
 No podrías teclearla en la consola de la máquina virtual.
 Usa solo letras sin tilde, números y signos básicos."
     fi
+}
 
+# Los tiempos de espera que se pueden ajustar desde el entorno
+validar_entorno_numerico() {
+    local v n
+    for v in WAIT_TIMEOUT POLL_SECS GRACE_SECS SHUTDOWN_TIMEOUT; do
+        if ! n="$(decimal "${!v}")" || { [[ "$v" == POLL_SECS ]] && (( n < 1 )); }; then
+            error 13 "La variable de entorno CI_PROVISION_$v ('${!v}') no es válida: debe ser un número de segundos."
+        fi
+        printf -v "$v" '%s' "$n"
+    done
 }
 
 # Nombres que salen de las opciones (dominio, hostname, disco principal)
 calcular_derivados() {
-    ########################################
-    # Derivados
-    ########################################
     # Sin --prefijo: dominio USUARIO-MAQUINA y ficheros MAQUINA.qcow2, como en el
-    # manual. Con él, el prefijo va también en los ficheros, para que dos juegos
+    # boletín. Con él, el prefijo va también en los ficheros, para que dos juegos
     # de máquinas convivan en el mismo silo sin pisarse.
     PREFIJO_DOMINIO="${PREFIJO_OPT:-$USUARIO}"
     PREFIJO_FICHERO="${PREFIJO_OPT:+${PREFIJO_OPT}-}"
     if ! $CLUSTER; then
         VM_NAME="${PREFIJO_DOMINIO}-${MAQUINA}"
         HOST_NAME="$MAQUINA"
-        DISCO_MAIN="${SILO_DIR}/${DISCO_OPT:-${PREFIJO_FICHERO}${MAQUINA}.qcow2}"
+        DISCO_MAIN="${SILO_DIR}/${DISCO_OPT:-$(disco_de "$MAQUINA")}"
     fi
+}
+
+# Nombre del disco principal de una máquina en el silo: MAQUINA.qcow2, o
+# PREFIJO-MAQUINA.qcow2 con --prefijo (solo el nombre, sin ruta)
+disco_de() {   # MAQUINA
+    printf '%s%s.qcow2' "$PREFIJO_FICHERO" "$1"
 }
 
 ########################################
@@ -735,9 +807,15 @@ crear_dominio() {
 
 # En --dry-run, si la imagen base no está en el silo
 avisar_imagen_falta() {
+    local compartida
     if $BASE_IMG_FALTA; then
-        echo "    Imagen  : $(basename "$BASE_IMG") no está en el silo; se descargará de"
-        echo "              $BASE_IMG_URL"
+        compartida="$(imagen_compartida)"
+        if [[ -n "$compartida" ]]; then
+            echo "    Imagen  : $(basename "$BASE_IMG") no está en el silo; se copiará de $compartida"
+        else
+            echo "    Imagen  : $(basename "$BASE_IMG") no está en el silo; se descargará de"
+            echo "              $BASE_IMG_URL"
+        fi
     fi
 }
 
@@ -773,6 +851,12 @@ bloque_acceso() {   # DOMINIO IP_PARA_SSH
     fi
     if ! $NO_GRAFICOS; then
         echo "  virt-viewer --connect qemu+ssh://${USUARIO}@$(servidor_fqdn)/system $vm"
+    fi
+    if [[ "$IMAGEN" == ubuntu-base && -z "$SSH_PASS" ]]; then
+        echo
+        echo "AVISO: 'administrador' conserva la contraseña de ubuntu-base, que es la misma para toda"
+        echo "       la clase, y entra por SSH con ella (y con sudo). Cualquier usuario del servidor"
+        echo "       podría entrar en esta máquina. Cámbiala dentro con: passwd"
     fi
 }
 

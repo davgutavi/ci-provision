@@ -58,10 +58,11 @@ comprueba() {
     if "$@" >>"$LOG" 2>&1; then ok "$desc"; else ko "$desc"; fi
 }
 
-# Ejecuta el script sin teclado: así --limpiar no pide confirmación (la
-# batería es quien decide) y ninguna orden puede quedarse esperando
+# Ejecuta el script sin teclado, para que ninguna orden pueda quedarse
+# esperando, y con --si: las confirmaciones de --limpiar y --eliminar las da la
+# batería (sin terminal y sin --si, el script se negaría con el error 23)
 ejecutar_script() {
-    bash "$SCRIPT" "$@" </dev/null
+    bash "$SCRIPT" --si "$@" </dev/null
 }
 
 # espera_codigo CODIGO DESCRIPCION ARGS...   ejecuta el script y compara el código
@@ -189,7 +190,7 @@ fase_a() {
     espera_codigo 10 "--gluster-cluster con MAQUINA"           --dry-run --gluster-cluster pruebas1
     espera_codigo 10 "--imagen desconocida"                    --dry-run --imagen fedora pruebas1
     espera_codigo 10 "--imagen ubuntu-base en una máquina suelta" --dry-run --imagen ubuntu-base pruebas1
-    espera_codigo 10 "--imagen con --base"                     --dry-run --imagen debian12 --base debian12.qcow2 pruebas1
+    espera_codigo 10 "--imagen desconocida con --base"         --dry-run --imagen fedora --base debian12.qcow2 pruebas1
     espera_codigo 10 "--discos-nodo sin --gluster-cluster"     --dry-run --discos-nodo 7 pruebas1
     espera_codigo 13 "--discos-nodo fuera de rango"            --dry-run --gluster-cluster --discos-nodo 8
     espera_codigo 10 "máquina llamada como una imagen cloud"   --dry-run --limpiar debian12

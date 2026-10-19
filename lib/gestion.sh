@@ -3,15 +3,18 @@
 #
 # Todo parte de libvirt, no de los nombres: los discos de una máquina son los
 # que dice 'virsh domblklist' (solo los que están en el silo). Nunca se borra
-# un disco que use otra máquina ni una imagen de la que dependan otras copias.
+# un disco que use otra máquina ni una imagen de la que dependan otras copias
+# (ver filtrar_borrables en limpieza.sh).
 ########################################
 
-# Dominios del usuario (o del prefijo): los que empiezan por PREFIJO-
+# Dominios del usuario (o del prefijo): los que empiezan por PREFIJO- y tienen
+# sus discos en el silo. Los nombres de dominio son de todo el servidor: con
+# --prefijo, otro usuario podría tener uno que empiece igual.
 dominios_propios() {
     local lista d
     lista="$(virsh list --all --name 2>/dev/null || true)"
     while IFS= read -r d; do
-        if [[ -n "$d" && "$d" == "${PREFIJO_DOMINIO}-"* ]]; then
+        if [[ -n "$d" && "$d" == "${PREFIJO_DOMINIO}-"* ]] && dominio_en_silo "$d"; then
             echo "$d"
         fi
     done <<< "$lista" | sort
@@ -47,25 +50,28 @@ ip_dominio() {   # DOMINIO
     echo "${ip:--}"
 }
 
-# Imagen de la que es copia un qcow2 (solo el nombre), o nada
+# Imagen de la que es copia un fichero (solo el nombre), o nada. Usa el mapa
+# de respaldos si ya está cargado; si no, pregunta solo por este fichero.
 respaldo_de() {   # FICHERO
     local b
-    b="$(qemu-img info -U --output=json "$1" 2>/dev/null | jq -r '."backing-filename" // empty' 2>/dev/null || true)"
+    if $RESPALDOS_CARGADOS; then
+        b="${RESPALDO[$1]:-}"
+    else
+        b="$(leer_respaldo "$1")"
+    fi
     if [[ -n "$b" ]]; then
         basename "$b"
     fi
 }
 
-# Copias del silo que dependen de un fichero: "a.qcow2, b.qcow2"
+# Copias del silo que dependen de un fichero: "a.qcow2, b.qcow2". Quien la
+# llame muchas veces debe cargar antes el mapa (cargar_respaldos) en su propio
+# proceso: dentro de $(...) no se conservaría entre llamadas.
 copias_de() {   # FICHERO
-    local o b res=""
-    for o in "$SILO_DIR"/*.qcow2; do
-        if [[ ! -f "$o" || "$o" == "$1" ]]; then continue; fi
-        b="$(respaldo_de "$o")"
-        if [[ -n "$b" && "$b" == "$(basename "$1")" ]]; then
-            res+="${res:+, }$(basename "$o")"
-        fi
-    done
+    local c res=""
+    while IFS= read -r c; do
+        if [[ -n "$c" ]]; then res+="${res:+, }$(basename "$c")"; fi
+    done < <(copias_directas "$1" | sort)
     echo "$res"
 }
 
@@ -138,6 +144,8 @@ listar_maquinas() {
     local d estado ip f
     local -a doms=() sueltos=()
 
+    cargar_respaldos
+
     while IFS= read -r d; do
         if [[ -n "$d" ]]; then doms+=( "$d" ); fi
     done < <(dominios_propios)
@@ -182,14 +190,18 @@ ELIM_SIN_NADA=()
 
 # Rellena las listas anteriores para las máquinas indicadas por su nombre corto
 planificar_eliminacion() {   # NOMBRE...
-    local m vm f d otro habia
+    local m vm f d habia
     local -a ficheros=()
     ELIM_DOMINIOS=(); ELIM_FICHEROS=(); ELIM_DIRS=(); ELIM_CONSERVADOS=(); ELIM_SIN_NADA=()
 
     for m in "$@"; do
         vm="${PREFIJO_DOMINIO}-${m}"
         habia=false
-        if virsh dominfo "$vm" >/dev/null 2>&1; then
+        if virsh dominfo "$vm" >/dev/null 2>&1 && ! dominio_en_silo "$vm"; then
+            # Se llama como las tuyas, pero sus discos no están en tu silo
+            ELIM_CONSERVADOS+=( "máquina $vm: sus discos no están en tu silo (no la ha creado este script para ti)" )
+            habia=true
+        elif virsh dominfo "$vm" >/dev/null 2>&1; then
             ELIM_DOMINIOS+=( "$vm" )
             habia=true
             while IFS= read -r f; do
@@ -200,7 +212,7 @@ planificar_eliminacion() {   # NOMBRE...
         fi
         # También los discos que llevan su nombre aunque no estén conectados
         # (una imagen base hecha con --glusterfs, restos de otra ejecución)
-        for f in "$SILO_DIR/${PREFIJO_FICHERO}${m}.qcow2" "$SILO_DIR/${PREFIJO_FICHERO}${m}"-vd?.qcow2; do
+        for f in "$SILO_DIR/$(disco_de "$m")" "$SILO_DIR/${PREFIJO_FICHERO}${m}"-vd?.qcow2; do
             if [[ -f "$f" ]] && ! en_lista "$f" ${ficheros[@]+"${ficheros[@]}"}; then
                 ficheros+=( "$f" )
                 habia=true
@@ -217,21 +229,16 @@ planificar_eliminacion() {   # NOMBRE...
         fi
     done
 
-    # Lo que use otra máquina, o de lo que dependan otras copias, se conserva
+    # Lo que use otra máquina, o de lo que dependan copias que se conservan,
+    # se conserva
     OBJ_DOMINIOS=( ${ELIM_DOMINIOS[@]+"${ELIM_DOMINIOS[@]}"} )
     OBJ_FICHEROS=( ${ficheros[@]+"${ficheros[@]}"} )
     cargar_dominios_vecinos
-    for f in ${ficheros[@]+"${ficheros[@]}"}; do
-        if imagen_protegida "$f"; then
-            ELIM_CONSERVADOS+=( "$(basename "$f"): es una imagen cloud de partida (nunca se borra)" )
-        elif otro="$(dominio_que_usa_disco "$f")"; then
-            ELIM_CONSERVADOS+=( "$(basename "$f"): lo usa la máquina '$otro'" )
-        elif otro="$(copia_que_depende "$f")"; then
-            ELIM_CONSERVADOS+=( "$(basename "$f"): es la imagen base de $(basename "$otro")" )
-        else
-            ELIM_FICHEROS+=( "$f" )
-        fi
-    done
+    if (( ${#ficheros[@]} > 0 )); then
+        filtrar_borrables "${ficheros[@]}"
+        ELIM_FICHEROS=( ${BORRABLES[@]+"${BORRABLES[@]}"} )
+        ELIM_CONSERVADOS+=( ${CONSERVADOS[@]+"${CONSERVADOS[@]}"} )
+    fi
 }
 
 hay_algo_que_eliminar() {
@@ -317,7 +324,7 @@ eliminar_maquinas() {   # NOMBRE...
 }
 
 eliminar_todo() {
-    local d f otro
+    local d f
     local -a nombres=() candidatos=() sueltos=()
 
     while IFS= read -r d; do
@@ -337,9 +344,11 @@ eliminar_todo() {
         fi
     done
 
-    # Discos del silo que quedarían sin máquina, salvo las imágenes cloud. Aquí se
-    # comprueba contra TODOS los dominios del servidor: una máquina con otro
-    # prefijo (o de otro usuario) podría estar usando un fichero de este silo.
+    # Discos del silo que quedarían sin máquina, salvo las imágenes cloud.
+    # Se comprueba contra todos los dominios del servidor y contra todas las
+    # copias del silo. Los discos de las máquinas ya están decididos (si el
+    # alumno dice que no a estos, sus copias se quedan y no pueden perder su
+    # imagen base); aquí solo se decide qué otros se pueden ofrecer.
     for f in "$SILO_DIR"/*.qcow2; do
         if [[ ! -f "$f" ]] || imagen_protegida "$f"; then continue; fi
         if en_lista "$f" ${ELIM_FICHEROS[@]+"${ELIM_FICHEROS[@]}"}; then continue; fi
@@ -349,16 +358,13 @@ eliminar_todo() {
     if (( ${#candidatos[@]} > 0 )); then
         echo "Comprobando qué discos del silo usa alguna máquina…"
         OBJ_DOMINIOS=( ${ELIM_DOMINIOS[@]+"${ELIM_DOMINIOS[@]}"} )
-        OBJ_FICHEROS=( ${ELIM_FICHEROS[@]+"${ELIM_FICHEROS[@]}"} "${candidatos[@]}" )
-        cargar_dominios_vecinos todos
-        for f in "${candidatos[@]}"; do
-            if otro="$(dominio_que_usa_disco "$f")"; then
-                ELIM_CONSERVADOS+=( "$(basename "$f"): lo usa la máquina '$otro'" )
-            elif otro="$(copia_que_depende "$f")"; then
-                ELIM_CONSERVADOS+=( "$(basename "$f"): es la imagen base de $(basename "$otro")" )
-            else
-                sueltos+=( "$f" )
-            fi
+        cargar_dominios_vecinos
+        filtrar_borrables ${ELIM_FICHEROS[@]+"${ELIM_FICHEROS[@]}"} "${candidatos[@]}"
+        for f in ${BORRABLES[@]+"${BORRABLES[@]}"}; do
+            if en_lista "$f" "${candidatos[@]}"; then sueltos+=( "$f" ); fi
+        done
+        for f in ${CONSERVADOS[@]+"${CONSERVADOS[@]}"}; do
+            ELIM_CONSERVADOS+=( "$f" )
         done
     fi
 

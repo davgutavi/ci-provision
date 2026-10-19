@@ -26,20 +26,14 @@ crear_disco_cow() {
 # alumno y que puede cambiar. Si se pide un tamaño mayor, se amplía.
 #   crear_disco_copia RUTA IMAGEN TAMAÑO
 crear_disco_copia() {
-    local ruta="$1" origen="$2" tam="$3" vs n tam_b
+    local ruta="$1" origen="$2" tam="$3" vs
 
     DISCOS_CREADOS+=( "$ruta" )
     cp "$origen" "$ruta"
     chmod u+w "$ruta"
 
-    vs="$(qemu-img info --output=json "$ruta" 2>/dev/null | jq -r '."virtual-size" // empty' 2>/dev/null || true)"
-    n="${tam%[MGT]}"
-    case "${tam: -1}" in
-        M) tam_b=$(( n * 1024 * 1024 )) ;;
-        G) tam_b=$(( n * 1024 * 1024 * 1024 )) ;;
-        T) tam_b=$(( n * 1024 * 1024 * 1024 * 1024 )) ;;
-    esac
-    if [[ "$vs" =~ ^[0-9]+$ ]] && (( tam_b > vs )); then
+    vs="$(tam_virtual "$ruta")"
+    if [[ "$vs" =~ ^[0-9]+$ ]] && (( $(tam_a_bytes "$tam") > vs )); then
         qemu-img resize -q "$ruta" "$tam"
     fi
 }

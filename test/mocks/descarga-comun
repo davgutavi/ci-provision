@@ -1,0 +1,32 @@
+# Parte común de los mocks de wget y curl (se carga con source)
+salida="" url=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -O|-o) salida="$2"; shift 2 ;;
+        http*) url="$1"; shift ;;
+        *)     shift ;;
+    esac
+done
+[[ -n "$salida" ]] || { echo "mock descarga: falta el fichero de salida" >&2; exit 2; }
+if [[ -n "${MOCK_WGET_FALLA:-}" ]]; then
+    echo "mock: unable to resolve host address" >&2
+    exit 4
+fi
+case "$url" in
+    *SUMS)
+        if [[ -n "${MOCK_SUMAS_FALLA:-}" ]]; then exit 8; fi
+        bits=256; nombre="noble-server-cloudimg-amd64.img"
+        if [[ "$url" == *SHA512SUMS ]]; then bits=512; nombre="debian-12-generic-amd64.qcow2"; fi
+        suma="$(shasum -a "$bits" < "$(cat "$S/ultima_descarga")" | awk '{print $1}')"
+        if [[ -n "${MOCK_SUMAS_MAL:-}" ]]; then suma="0000${suma:4}"; fi
+        { echo "1111111111 *otra-imagen.img"; echo "$suma *$nombre"; } > "$salida"
+        exit 0
+        ;;
+esac
+echo "$salida" > "$S/ultima_descarga"
+if [[ -n "${MOCK_WGET_CORRUPTO:-}" ]]; then
+    echo "<html><body>Portal cautivo</body></html>" > "$salida"
+    exit 0
+fi
+qemu-img create -f qcow2 "$salida" 3G >/dev/null
+exit 0
