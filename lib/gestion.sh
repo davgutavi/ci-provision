@@ -69,13 +69,14 @@ copias_de() {   # FICHERO
     echo "$res"
 }
 
-# Ficheros qcow2 del silo que no usa ninguna de las máquinas del usuario
+# Discos del silo (los qcow2 y la imagen cloud de Ubuntu, que es un .img) que
+# no usa ninguna de las máquinas del usuario
 discos_sin_maquina() {
     local f d usados=""
     for d in $(dominios_propios); do
         usados+="$(discos_de_dominio "$d")"$'\n'
     done
-    for f in "$SILO_DIR"/*.qcow2; do
+    for f in "$SILO_DIR"/*.qcow2 "$SILO_DIR/$IMAGEN_NOBLE"; do
         if [[ -f "$f" ]] && ! grep -qxF "$f" <<< "$usados"; then
             echo "$f"
         fi
@@ -115,8 +116,11 @@ descripcion_discos() {   # LISTA
 # Qué es un disco del silo que no usa ninguna máquina
 descripcion_disco_suelto() {   # FICHERO
     local f="$1" resp dep desc=""
-    if [[ "$f" == "$BASE_IMG" ]]; then
-        echo "imagen cloud de Debian: de ella salen todas las máquinas (no la borres)"
+    if [[ "$f" == "$SILO_DIR/$IMAGEN_NOBLE" ]]; then
+        echo "imagen cloud de Ubuntu 24.04: de ella salen las máquinas (no la borres)"
+        return 0
+    elif [[ "$f" == "$SILO_DIR/$IMAGEN_DEBIAN" ]]; then
+        echo "imagen cloud de Debian 12: de ella salen las máquinas (no la borres)"
         return 0
     fi
     resp="$(respaldo_de "$f")"
@@ -218,7 +222,9 @@ planificar_eliminacion() {   # NOMBRE...
     OBJ_FICHEROS=( ${ficheros[@]+"${ficheros[@]}"} )
     cargar_dominios_vecinos
     for f in ${ficheros[@]+"${ficheros[@]}"}; do
-        if otro="$(dominio_que_usa_disco "$f")"; then
+        if imagen_protegida "$f"; then
+            ELIM_CONSERVADOS+=( "$(basename "$f"): es una imagen cloud de partida (nunca se borra)" )
+        elif otro="$(dominio_que_usa_disco "$f")"; then
             ELIM_CONSERVADOS+=( "$(basename "$f"): lo usa la máquina '$otro'" )
         elif otro="$(copia_que_depende "$f")"; then
             ELIM_CONSERVADOS+=( "$(basename "$f"): es la imagen base de $(basename "$otro")" )
@@ -331,11 +337,11 @@ eliminar_todo() {
         fi
     done
 
-    # Discos del silo que quedarían sin máquina, salvo la imagen cloud. Aquí se
+    # Discos del silo que quedarían sin máquina, salvo las imágenes cloud. Aquí se
     # comprueba contra TODOS los dominios del servidor: una máquina con otro
     # prefijo (o de otro usuario) podría estar usando un fichero de este silo.
     for f in "$SILO_DIR"/*.qcow2; do
-        if [[ ! -f "$f" || "$f" == "$BASE_IMG" ]]; then continue; fi
+        if [[ ! -f "$f" ]] || imagen_protegida "$f"; then continue; fi
         if en_lista "$f" ${ELIM_FICHEROS[@]+"${ELIM_FICHEROS[@]}"}; then continue; fi
         if [[ -n "$PREFIJO_OPT" && "$(basename "$f")" != "${PREFIJO_OPT}-"* ]]; then continue; fi
         candidatos+=( "$f" )
@@ -358,7 +364,7 @@ eliminar_todo() {
 
     if ! hay_algo_que_eliminar && (( ${#sueltos[@]} == 0 )); then
         error 22 "No hay nada que eliminar: ni máquinas ${PREFIJO_DOMINIO}-* ni discos sin máquina en $SILO_DIR
-(aparte de $(basename "$BASE_IMG"), que se conserva siempre)."
+(aparte de las imágenes cloud $IMAGEN_NOBLE y $IMAGEN_DEBIAN, que se conservan siempre)."
     fi
 
     mostrar_plan_eliminacion

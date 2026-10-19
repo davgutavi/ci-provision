@@ -13,16 +13,38 @@ esac
 # configurado en el servidor.
 export LC_ALL=C
 
-VERSION="2.3.0"
+VERSION="3.0.0"
 
 ########################################
 # Configuración general
 ########################################
 SILO_DIR="$HOME/imagenesMV"
-PUBKEY_PATH="$HOME/.ssh/id_rsa.pub"
-BASE_IMG="$SILO_DIR/debian12.qcow2"
-# De dónde se descarga si no está en el silo (la misma URL del manual)
-BASE_IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
+# La clave del manual. Se puede cambiar desde el entorno: la batería de pruebas
+# del servidor pone aquí su clave de usar y tirar (ver DESARROLLO.md)
+PUBKEY_PATH="${CI_PROVISION_PUBKEY:-$HOME/.ssh/id_rsa.pub}"
+
+# Imágenes de partida (--imagen). Las dos imágenes cloud se descargan al silo
+# si faltan, con el nombre y desde la URL que dan los boletines.
+#   noble        Ubuntu 24.04: SERVER1 y nodos GlusterFS del boletín 2
+#   debian12     Debian 12: SERVER1 del boletín 1
+#   ubuntu-base  la imagen del boletín 1 que dejan los profesores en
+#                /home/ssoo-shared; solo para la base GlusterFS, si se quiere
+#                hacer como la construcción manual del boletín (epígrafe 2.4),
+#                sobre una copia suya en el silo
+IMAGEN_NOBLE="noble-server-cloudimg-amd64.img"
+URL_NOBLE="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+IMAGEN_DEBIAN="debian12.qcow2"
+URL_DEBIAN="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
+# Se puede cambiar desde el entorno; los tests lo usan para no depender del servidor
+UBUNTU_BASE_COMPARTIDA="${UBUNTU_BASE_COMPARTIDA:-/home/ssoo-shared/ubuntu-base.qcow2}"
+IMAGEN_DEFECTO="noble"                # máquinas sueltas
+IMAGEN_DEFECTO_GLUSTER="noble"        # --glusterfs y --gluster-cluster
+
+# Los fija elegir_imagen según --imagen (o comprobar_imagen_base, con --base)
+IMAGEN=""          # noble | debian12 | ubuntu-base
+BASE_IMG=""        # fichero del que sale el disco principal
+BASE_IMG_URL=""    # de dónde se descarga si falta (vacío: no se descarga)
+OS_VARIANT=""      # variante de SO que se declara a virt-install
 
 # Usuario del servidor: de él salen los nombres de los dominios y el de la red
 USUARIO="$(id -un)"
@@ -35,17 +57,21 @@ PASS_CONSOLA="s1st3mas"
 # Discos
 TAM_DISCO_DEFECTO="40G"
 TAM_DISCO_EXTRA="40G"
-UNIDADES_EXTRA=(vdb vdc vdd vde vdf vdg)          # --extra-disks (apartado A.3.1 del manual)
-UNIDADES_CLUSTER=(vdb vdc vdd vde vdf vdg vdh)    # nodos del clúster (apartado A.3.2)
+UNIDADES_EXTRA=(vdb vdc vdd vde vdf vdg)          # --extra-disks (boletín 2, epígrafe 2.1)
 
-# Clúster GlusterFS (apartado A.3.2 del manual)
-CLUSTER_BASE="glusterbase"
+# Clúster GlusterFS (boletín 2, epígrafe 2.4)
+CLUSTER_BASE="gluster-base"
 CLUSTER_NODOS=(server1 server2 server3 server4)
 CLUSTER_IP_INICIAL=10                             # server1 = .10, server2 = .11, ...
 CLUSTER_RAM_MB=1024                               # recursos por nodo: los mismos que
 CLUSTER_VCPUS=1                                   # usa crea-entorno.sh
 CLUSTER_MONTAJES=(/gluster1 /gluster2 /gluster3)  # vdb, vdc y vdd, formateados en xfs
-OPCIONES_FSTAB_CLUSTER="auto,async,nofail"        # las mismas líneas de fstab que muestra el manual
+OPCIONES_FSTAB_CLUSTER="auto,async,nofail"        # las mismas líneas de fstab que crea-entorno.sh
+# Discos extra por nodo (--discos-nodo): los tres del boletín por defecto;
+# crea-entorno.sh conecta siete (vdb..vdh), de los que solo formatea tres
+UNIDADES_POSIBLES_NODO=(vdb vdc vdd vde vdf vdg vdh)
+DISCOS_NODO_DEFECTO=3
+UNIDADES_CLUSTER=()                               # las fija validar_opciones
 
 # Recursos por defecto de una máquina suelta
 RAM_MB_DEFECTO=2048
@@ -77,6 +103,9 @@ NOMBRES=()          # --eliminar: máquinas a eliminar
 RED_OPT=""
 DISCO_OPT=""
 TAM_DISCO="$TAM_DISCO_DEFECTO"
+TAM_EXPLICITO=false  # --tam: si no se indica, el disco crece hasta el tamaño de la imagen
+IMAGEN_OPT=""        # --imagen
+DISCOS_NODO_OPT=""   # --discos-nodo
 RAM_OPT=""
 VCPUS_OPT=""
 SSH_PASS=""
@@ -226,30 +255,43 @@ Uso:
   $0 --eliminar-todo
   $0 --menu                  (asistente con menús; también al ejecutarlo sin argumentos)
 
-Crea una máquina virtual Debian 12 con cloud-init en tu silo ($SILO_DIR).
+Crea una máquina virtual con cloud-init en tu silo ($SILO_DIR).
 De MAQUINA salen el nombre del dominio (${USUARIO}-MAQUINA), el nombre de
 host (MAQUINA) y el disco (MAQUINA.qcow2), que el script crea como copia COW
-de debian12.qcow2 (si no está en el silo, la descarga). La red virtual se
-busca por tu nombre de usuario.
+de la imagen cloud de Ubuntu 24.04 ($IMAGEN_NOBLE; si no está en
+el silo, la descarga). La red virtual se busca por tu nombre de usuario.
 
 Parámetros:
-  MAQUINA              Nombre corto de la máquina (server1, server2, glusterbase, ...)
+  MAQUINA              Nombre corto de la máquina (server1, server2, gluster-base, ...)
   IP                   (Opcional) IP fija dentro de tu red virtual. Sin ella, DHCP.
 
 Opciones:
   --extra-disks        Crea y conecta 6 discos extra de ${TAM_DISCO_EXTRA} (vdb..vdg)
+  --imagen IMAGEN      Imagen de partida:
+                         noble        Ubuntu 24.04, $IMAGEN_NOBLE (por defecto,
+                                      también para la base GlusterFS)
+                         debian12     Debian 12, $IMAGEN_DEBIAN (la del boletín 1)
+                         ubuntu-base  la imagen del boletín 1 de $(dirname "$UBUNTU_BASE_COMPARTIDA");
+                                      solo para la base GlusterFS, como en la construcción
+                                      manual del boletín 2
+                       Las dos primeras se descargan al silo si no están.
   --glusterfs          Construye una imagen base GlusterFS: crea la máquina con
                        glusterfs-server instalado, glusterd habilitado y el
                        machine-id vacío y, al terminar, la apaga y elimina el
                        dominio. Queda solo MAQUINA.qcow2, listo para hacer copias.
+                       Con ubuntu-base, MAQUINA.qcow2 es una copia completa de esa
+                       imagen (no depende del fichero de $(dirname "$UBUNTU_BASE_COMPARTIDA")).
   --gluster-cluster    Construye la infraestructura completa del epígrafe 2.4 del
-                       boletín 2: la base anterior y ${#CLUSTER_NODOS[@]} nodos (${CLUSTER_NODOS[*]})
-                       con IP fija, /etc/hosts, ${#UNIDADES_CLUSTER[@]} discos cada uno y
-                       ${CLUSTER_MONTAJES[*]} en xfs. No lleva MAQUINA.
-  --base FICHERO       Imagen del silo de la que hacer la copia COW, en lugar de
-                       debian12.qcow2 (p.ej. una imagen base GlusterFS que ya
-                       tengas). Con --gluster-cluster se omite la fase 1 y los
-                       nodos parten de ella.
+                       boletín 2: la base anterior (${CLUSTER_BASE}.qcow2) y ${#CLUSTER_NODOS[@]} nodos
+                       (${CLUSTER_NODOS[*]}) con IP fija, /etc/hosts, ${DISCOS_NODO_DEFECTO} discos
+                       cada uno y ${CLUSTER_MONTAJES[*]} en xfs. No lleva MAQUINA.
+  --discos-nodo N      Discos extra por nodo del clúster, de ${DISCOS_NODO_DEFECTO} a ${#UNIDADES_POSIBLES_NODO[@]} (por defecto
+                       ${DISCOS_NODO_DEFECTO}, como el boletín; con ${#UNIDADES_POSIBLES_NODO[@]}, como crea-entorno.sh). Solo los
+                       tres primeros se formatean y se montan.
+  --base FICHERO       Imagen del silo de la que hacer la copia COW (p.ej. una
+                       imagen base GlusterFS que ya tengas). Con --gluster-cluster
+                       se omite la fase 1 y los nodos parten de ella. El tipo de
+                       imagen se deduce de ella, así que no se combina con --imagen.
   --no-root            No habilita al usuario root (queda sin contraseña, como en
                        las máquinas que se crean a mano)
   --no-virt-viewer     No habilita la consola gráfica (virt-viewer). La consola de
@@ -261,7 +303,8 @@ Opciones:
   --prefijo PREFIJO    Sustituye a tu usuario en los nombres: dominio PREFIJO-MAQUINA
                        y, en ese caso, también los discos (PREFIJO-MAQUINA.qcow2)
   --disco NOMBRE       Nombre del disco principal (por defecto MAQUINA.qcow2)
-  --tam TAMAÑO         Tamaño del disco principal (por defecto ${TAM_DISCO_DEFECTO})
+  --tam TAMAÑO         Tamaño del disco principal (por defecto ${TAM_DISCO_DEFECTO}, o el de la
+                       imagen de partida si es mayor: ubuntu-base tiene 64G)
   --ram MB             Memoria (por defecto ${RAM_MB_DEFECTO}; en el clúster, ${CLUSTER_RAM_MB} por nodo)
   --vcpus N            vCPUs (por defecto ${VCPUS_DEFECTO}; en el clúster, ${CLUSTER_VCPUS} por nodo)
   --ssh-pass CONTRASEÑA
@@ -291,18 +334,22 @@ Ver y eliminar lo que ya tienes:
 En todas las máquinas:
   - Usuario 'administrador' con tu clave pública ($PUBKEY_PATH) y
     sudo sin contraseña. Sin contraseña propia salvo que uses --ssh-pass.
+    En las que salen de ubuntu-base (la base GlusterFS y sus nodos) se queda
+    como en esa imagen: con la contraseña del boletín 1, que sudo pide; el
+    script solo le añade tu clave pública.
   - Usuario 'root' con contraseña '${PASS_CONSOLA}', solo para la consola
     (virsh console o virt-viewer); por SSH no puede entrar. Con --no-root,
     sin contraseña.
   - Consola gráfica activa (virt-viewer), salvo con --no-virt-viewer.
 
 Ejemplos (XXX es el tercer número de tu red virtual; lo ves en el resumen de --dry-run):
-  $0 server1                                    # DHCP
+  $0 server1                                    # Ubuntu 24.04 con DHCP
+  $0 --imagen debian12 server1 192.168.XXX.2    # SERVER1 del boletín 1 (Debian 12)
   $0 --extra-disks server1 192.168.XXX.2        # SERVER1 del boletín 2, epígrafe 2.1
   $0 --gluster-cluster                          # infraestructura del boletín 2, epígrafe 2.4
-  $0 --glusterfs glusterbase                    # solo la imagen base GlusterFS
-  $0 --gluster-cluster --base glusterbase.qcow2 # la infraestructura a partir de esa imagen
-  $0 --dry-run --extra-disks server1 192.168.XXX.2   # solo comprobar
+  $0 --glusterfs gluster-base                   # solo la imagen base GlusterFS
+  $0 --gluster-cluster --base gluster-base.qcow2   # la infraestructura a partir de esa imagen
+  $0 --dry-run --extra-disks server1 192.168.XXX.2 # solo comprobar
 EOF
 }
 
@@ -331,7 +378,7 @@ parse_args() {
                 echo "ci-provision.sh $VERSION"
                 exit 0
                 ;;
-            --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass|--prefijo)
+            --red|--disco|--base|--tam|--ram|--vcpus|--ssh-pass|--prefijo|--imagen|--discos-nodo)
                 if [[ $# -lt 2 || "$2" == --* ]]; then
                     error 11 "Falta el valor de la opción $1. Escríbelo a continuación, separado por un espacio: $1 VALOR"
                 fi
@@ -342,7 +389,9 @@ parse_args() {
                     --red)      RED_OPT="$2"   ;;
                     --disco)    DISCO_OPT="$2" ;;
                     --base)     BASE_OPT="$2"  ;;
-                    --tam)      TAM_DISCO="$2" ;;
+                    --tam)      TAM_DISCO="$2"; TAM_EXPLICITO=true ;;
+                    --imagen)   IMAGEN_OPT="$2" ;;
+                    --discos-nodo) DISCOS_NODO_OPT="$2" ;;
                     --ram)      RAM_OPT="$2"   ;;
                     --vcpus)    VCPUS_OPT="$2" ;;
                     --ssh-pass) SSH_PASS="$2"  ;;
@@ -414,8 +463,8 @@ validar_opciones() {
         error 10 "--gluster-cluster, --listar, --eliminar, --eliminar-todo y --menu son modos distintos: usa solo uno."
     fi
     if $LISTAR || $ELIMINAR || $ELIMINAR_TODO || $MENU; then
-        if $EXTRA_DISKS || $GLUSTERFS || $LIMPIAR || $NO_WAIT || $NO_ROOT || $NO_GRAFICOS || \
-           [[ -n "$RED_OPT$DISCO_OPT$BASE_OPT$RAM_OPT$VCPUS_OPT$SSH_PASS" ]] || [[ "$TAM_DISCO" != "$TAM_DISCO_DEFECTO" ]]; then
+        if $EXTRA_DISKS || $GLUSTERFS || $LIMPIAR || $NO_WAIT || $NO_ROOT || $NO_GRAFICOS || $TAM_EXPLICITO || \
+           [[ -n "$RED_OPT$DISCO_OPT$BASE_OPT$RAM_OPT$VCPUS_OPT$SSH_PASS$IMAGEN_OPT$DISCOS_NODO_OPT" ]]; then
             error 10 "Con --listar, --eliminar, --eliminar-todo y --menu solo se admiten --prefijo y --dry-run."
         fi
         if $ELIMINAR; then
@@ -451,7 +500,7 @@ cuando cloud-init termine, así que es imprescindible esperar."
             error 10 "La opción --disco no se aplica a --gluster-cluster: los discos se llaman como los nodos."
         fi
         if $GLUSTERFS || $EXTRA_DISKS; then
-            error 10 "--gluster-cluster ya construye la imagen base y los ${#UNIDADES_CLUSTER[@]} discos de cada nodo:
+            error 10 "--gluster-cluster ya construye la imagen base y los discos de cada nodo:
 no se combina con --glusterfs ni con --extra-disks."
         fi
     elif $LISTAR || $ELIMINAR || $ELIMINAR_TODO || $MENU; then
@@ -533,10 +582,25 @@ y la IP la reciben las copias que hagas de ${MAQUINA}.qcow2."
 
     if [[ -n "$BASE_OPT" ]]; then
         if ! [[ "$BASE_OPT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-            error 16 "El nombre de imagen '$BASE_OPT' (--base) no es válido. Indica solo el nombre del fichero del silo (sin rutas), p.ej. glusterbase.qcow2."
+            error 16 "El nombre de imagen '$BASE_OPT' (--base) no es válido. Indica solo el nombre del fichero del silo (sin rutas), p.ej. gluster-base.qcow2."
         fi
-        BASE_IMG="${SILO_DIR}/${BASE_OPT}"
+        if [[ -n "$IMAGEN_OPT" ]]; then
+            error 10 "--imagen y --base no se combinan: con --base la máquina sale de ese fichero,
+y el tipo de imagen se deduce de él."
+        fi
     fi
+    elegir_imagen
+
+    # Discos por nodo del clúster
+    if [[ -n "$DISCOS_NODO_OPT" ]] && ! $CLUSTER; then
+        error 10 "--discos-nodo solo se aplica a --gluster-cluster. En una máquina suelta, usa --extra-disks."
+    fi
+    local n="${DISCOS_NODO_OPT:-$DISCOS_NODO_DEFECTO}"
+    if ! [[ "$n" =~ ^[0-9]+$ ]] || (( n < ${#CLUSTER_MONTAJES[@]} || n > ${#UNIDADES_POSIBLES_NODO[@]} )); then
+        error 13 "El número de discos por nodo '$n' no es válido. Debe estar entre ${#CLUSTER_MONTAJES[@]} (los que se montan
+en ${CLUSTER_MONTAJES[*]}) y ${#UNIDADES_POSIBLES_NODO[@]} (vdb..vdh, como crea-entorno.sh)."
+    fi
+    UNIDADES_CLUSTER=( "${UNIDADES_POSIBLES_NODO[@]:0:$n}" )
 
     if [[ -n "$PREFIJO_OPT" ]] && ! [[ "$PREFIJO_OPT" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
         error 20 "El prefijo '$PREFIJO_OPT' no es válido. Solo letras, números y guiones, p.ej. demo."
@@ -625,7 +689,7 @@ construir_comando() {
     done
 
     VIRT_INSTALL_CMD+=(
-        --os-variant debian12
+        --os-variant "$OS_VARIANT"
         --network "network=$NET_NAME"
         --cloud-init "user-data=$USER_DATA,meta-data=$META_DATA${NETWORK_DATA:+,network-config=$NETWORK_DATA}"
     )
@@ -695,8 +759,12 @@ bloque_acceso() {   # DOMINIO IP_PARA_SSH
     printf '  %-42s %s\n' "ssh administrador@$ip" "con tu clave pública"
     if [[ -n "$SSH_PASS" ]]; then
         printf '  %-42s %s\n' "" "(o con la contraseña: $SSH_PASS)"
+    elif [[ "$IMAGEN" == ubuntu-base ]]; then
+        printf '  %-42s %s\n' "" "(o con la contraseña de ubuntu-base del boletín 1; sudo la pide)"
     fi
-    if $NO_ROOT && [[ -z "$SSH_PASS" ]]; then
+    if $NO_ROOT && [[ -z "$SSH_PASS" && "$IMAGEN" == ubuntu-base ]]; then
+        printf '  %-42s %s\n' "virsh console $vm" "administrador, con la contraseña de ubuntu-base"
+    elif $NO_ROOT && [[ -z "$SSH_PASS" ]]; then
         printf '  %-42s %s\n' "virsh console $vm" "(con --no-root y sin --ssh-pass nadie entra por consola: usa SSH)"
     elif $NO_ROOT; then
         printf '  %-42s %s\n' "virsh console $vm" "administrador, contraseña: $SSH_PASS"
@@ -724,7 +792,8 @@ print_summary() {
 
     echo "-------------------------------------------"
     echo "Máquina      : $VM_NAME  (hostname: $HOST_NAME)"
-    echo "Disco        : $DISCO_MAIN ($TAM_DISCO)"
+    echo "Sistema      : $(descripcion_imagen "$IMAGEN")"
+    echo "Disco        : $DISCO_MAIN ($TAM_DISCO, copia COW de $(basename "$BASE_IMG"))"
     echo "Red          : $NET_NAME"
     echo "IP           : $ip_mostrar"
     echo "RAM / vCPUs  : ${RAM_MB} MB / ${VCPUS}"
@@ -756,10 +825,10 @@ print_summary_base() {
     echo "-------------------------------------------"
     echo "Imagen base GlusterFS lista"
     echo
-    echo "Disco        : $DISCO_MAIN ($TAM_DISCO)"
-    echo "Contenido    : Debian 12 con glusterfs-server instalado (y las herramientas para"
-    echo "               formatear en xfs), glusterd habilitado, zona horaria Europe/Madrid"
-    echo "               y machine-id vacío"
+    echo "Disco        : $DISCO_MAIN ($TAM_DISCO, $(origen_disco_principal "$BASE_IMG"))"
+    echo "Contenido    : $(descripcion_imagen "$IMAGEN") con glusterfs-server instalado (y las"
+    echo "               herramientas para formatear en xfs), glusterd habilitado, zona horaria"
+    echo "               Europe/Madrid y machine-id vacío"
     echo "Dominio      : $VM_NAME se ha eliminado; solo queda el disco"
     echo
     echo "Úsalo como respaldo de las copias COW de tus nodos. Con el script:"
@@ -814,8 +883,8 @@ crear_maquina() {
     generar_cloudinit "$vm" "$host" "$ip" "$modo"
     construir_comando "$vm" "$RAM_MB" "$VCPUS" "$disco" ${extras[@]+"${extras[@]}"}
 
-    echo "→ Creando el disco $(basename "$disco") (copia COW de $(basename "$base"), $TAM_DISCO)…"
-    crear_disco_cow "$disco" "$base" "$TAM_DISCO"
+    echo "→ Creando el disco $(basename "$disco") ($(origen_disco_principal "$base"), $TAM_DISCO)…"
+    crear_disco_principal "$disco" "$base" "$TAM_DISCO"
     if (( ${#extras[@]} > 0 )); then
         echo "→ Creando ${#extras[@]} discos extra de $TAM_DISCO_EXTRA ($(basename "${extras[0]}") … $(basename "${extras[-1]}"))…"
         for d in "${extras[@]}"; do
@@ -848,6 +917,7 @@ mostrar_plan_maquina() {
         echo "    Prefijo : $PREFIJO_OPT (sustituye al usuario en los dominios y en los discos)"
     fi
     echo "    Máquina : $VM_NAME  (hostname: $HOST_NAME)"
+    echo "    Sistema : $(descripcion_imagen "$IMAGEN"); variante $OS_VARIANT"
     echo "    Red     : $NET_NAME (pasarela $NET_GATEWAY, prefijo /$NET_PREFIX)"
     if [[ -n "$IP" ]]; then
         echo "    IP      : $IP, disponible para asignación fija"
@@ -860,7 +930,7 @@ mostrar_plan_maquina() {
     echo "✔ Ficheros cloud-init generados en $WORKDIR/"
     echo
     echo "Discos que se crearían en $SILO_DIR:"
-    echo "    $(basename "$DISCO_MAIN")  (copia COW de $(basename "$BASE_IMG"), $TAM_DISCO)"
+    echo "    $(basename "$DISCO_MAIN")  ($(origen_disco_principal "$BASE_IMG"), $TAM_DISCO)"
     for disco in ${EXTRAS[@]+"${EXTRAS[@]}"}; do
         echo "    $(basename "$disco")  ($TAM_DISCO_EXTRA)"
     done

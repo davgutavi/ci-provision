@@ -10,7 +10,7 @@ mano. El código vive separado en módulos:
 
 ```
 src/main.sh          Opciones, flujo principal, rollback y resumen
-lib/validations.sh   Entorno, elección de la red, validación de IPs, imagen base
+lib/validations.sh   Entorno, elección de la red, validación de IPs, imagen de partida (--imagen)
 lib/limpieza.sh      Conflictos con lo que ya existe y --limpiar
 lib/cloudinit.sh     Ficheros cloud-init y expulsión del medio
 lib/discos.sh        Creación de discos
@@ -51,7 +51,9 @@ y ejecuta:
 test_helper/bats-core/bin/bats test/
 ```
 
-Necesitan `qemu-img` y `jq` (en macOS: `brew install qemu jq`).
+Necesitan `qemu-img` y `jq` (en macOS: `brew install qemu jq`). En el silo de
+mentira están ya las dos imágenes cloud (pequeñas) y una `ubuntu-base.qcow2` de
+64G vacía, a la que apunta `UBUNTU_BASE_COMPARTIDA`.
 
 Los simuladores admiten variables de entorno para provocar situaciones
 concretas (el agente que tarda en responder, cloud-init que falla, la descarga
@@ -68,13 +70,33 @@ bash tools/pruebas-servidor.sh c       # crea el clúster GlusterFS y lo comprue
 bash tools/pruebas-servidor.sh todas
 ```
 
-Las fases B y C entran en las máquinas por SSH con tu clave, así que antes hay
-que cargarla en el agente (`eval "$(ssh-agent -s)" && ssh-add`). Variables:
+- **A**: códigos de error y `--dry-run` (imagen por defecto, `--imagen`, base del clúster).
+- **B**: SERVER1 de Ubuntu con DHCP y con IP fija y seis discos, con las
+  instantáneas internas `--atomic` del boletín (en caliente, en frío,
+  `detach-disk` de `vdb` y reversiones); Debian 12 con `--ssh-pass` y `--no-root`;
+  `--glusterfs` desde Noble y desde ubuntu-base; `--listar` y `--eliminar`.
+- **C**: el clúster por defecto, comprobado nodo a nodo; `gluster peer probe`;
+  vDisperso montado en `server4` con MySQL en Podman encima (epígrafe 2.9), y
+  los nodos rehechos con `--base gluster-base.qcow2 --discos-nodo 7`.
+
+Para entrar en las máquinas, las fases B y C usan una **clave de usar y tirar**:
+la batería la genera al empezar (en `~/.ci-provision-pruebas.XXXXXX`, sin frase
+de paso), se la da a las máquinas con `CI_PROVISION_PUBKEY` y la borra al
+terminar, pase lo que pase. No se usa ninguna clave tuya ni ningún agente SSH:
+si esa clave se filtrara, solo abriría las máquinas de prueba.
+
+Al terminar **no queda ninguna máquina en marcha**: B y C eliminan todo lo que
+crean. Variables:
 
 - `LIMPIAR=1`: en la fase C, pasa `--limpiar` al script si ya existen
-  `server1`..`4` o `glusterbase` (el script enumera qué borra).
-- `CONSERVAR=1`: en la fase B, no elimina las máquinas al terminar (la fase C
-  siempre conserva el clúster).
+  `server1`..`4` o `gluster-base` (el script enumera qué borra).
+- `CONSERVAR=1`: no elimina las máquinas ni el clúster al terminar. Como la
+  clave de pruebas se borra, solo se podrá entrar en ellas por consola.
+- `SIN_MYSQL=1`: en la fase C, omite la prueba de MySQL (unos 3 minutos).
+
+Se puede lanzar sin terminal (`ssh servidor 'bash …/pruebas-servidor.sh b'`):
+la batería fija `LIBVIRT_DEFAULT_URI=qemu:///system`, porque sin una sesión de
+login `virsh` se conectaría a `qemu:///session` y no vería nada.
 
 Cada ejecución deja un log completo en el silo (`pruebas-servidor-FECHA.log`).
 
@@ -92,7 +114,18 @@ Cada ejecución deja un log completo en el silo (`pruebas-servidor-FECHA.log`).
   con `virsh qemu-agent-command` (guest-exec). Está comprobado que funciona
   para un usuario normal en los servidores de la asignatura.
 - Los nodos del clúster son copias COW de la base con un `instance-id`
-  nuevo: eso es lo que hace que cloud-init los vuelva a configurar.
+  nuevo: eso es lo que hace que cloud-init los vuelva a configurar. Con
+  `--imagen ubuntu-base` funciona igual: esa imagen trae cloud-init con NoCloud.
+- En el user-data solo van claves vigentes en el cloud-init de Ubuntu 24.04
+  (`chpasswd: users:`, `ssh_authorized_keys`). Una obsoleta (`chpasswd: list:`,
+  `ssh-authorized-keys`) deja el estado en `degraded done`, que el script trata
+  como error. Debian 12 (cloud-init 22.4) también acepta la sintaxis nueva.
+- Con `--base`, el tipo de imagen (y con él la variante de SO y cómo queda
+  `administrador`) se deduce de la última imagen de su cadena de respaldo
+  (`deducir_imagen_de_base`); un fichero sin respaldo se trata como una copia
+  de ubuntu-base.
+- Las imágenes cloud (`imagen_protegida`) no se borran nunca, ni con
+  `--limpiar` ni con `--eliminar`/`--eliminar-todo`.
 - `tools/build.sh` concatena las librerías **antes** de `src/main.sh` y solo
   elimina de este las líneas `source …/lib/*.sh`: nada de las librerías puede
   ejecutarse a nivel superior dependiendo de variables de `main.sh`, y ningún

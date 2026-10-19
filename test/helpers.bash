@@ -16,7 +16,13 @@ preparar_entorno() {
 
     mkdir -p "$SILO" "$HOME/.ssh" "$MOCK_STATE"
     echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC0falsa ${USUARIO}@test" > "$HOME/.ssh/id_rsa.pub"
+    # Las dos imágenes cloud ya descargadas (la de Ubuntu es un .img en formato
+    # qcow2, como la real) y la ubuntu-base "del servidor", de 64G como la real
+    qemu-img create -f qcow2 "$SILO/noble-server-cloudimg-amd64.img" 3G >/dev/null
     qemu-img create -f qcow2 "$SILO/debian12.qcow2" 3G >/dev/null
+    mkdir -p "$BATS_TEST_TMPDIR/ssoo-shared"
+    export UBUNTU_BASE_COMPARTIDA="$BATS_TEST_TMPDIR/ssoo-shared/ubuntu-base.qcow2"
+    qemu-img create -f qcow2 "$UBUNTU_BASE_COMPARTIDA" 64G >/dev/null
 
     # Esperas cortas para que los tests no tarden
     export WAIT_TIMEOUT=15

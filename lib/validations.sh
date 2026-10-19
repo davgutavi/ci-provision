@@ -345,13 +345,101 @@ calcular_ips_cluster() {
 }
 
 ########################################
+# Imagen de partida (--imagen, o la que se deduce de --base)
+########################################
+
+# Variante de SO que se declara a virt-install para cada imagen
+variante_de_imagen() {   # IMAGEN
+    case "$1" in
+        debian12) echo "debian12" ;;
+        *)        echo "ubuntu24.04" ;;
+    esac
+}
+
+# Nombre legible de cada imagen, para los mensajes
+descripcion_imagen() {   # IMAGEN
+    case "$1" in
+        noble)       echo "Ubuntu 24.04 (imagen cloud)" ;;
+        debian12)    echo "Debian 12 (imagen cloud)" ;;
+        ubuntu-base) echo "Ubuntu 24.04 (ubuntu-base.qcow2 del boletín 1)" ;;
+    esac
+}
+
+# ¿Es una de las imágenes cloud que descarga el script? Nunca se borran.
+imagen_protegida() {   # FICHERO
+    [[ "$1" == "$SILO_DIR/$IMAGEN_NOBLE" || "$1" == "$SILO_DIR/$IMAGEN_DEBIAN" ]]
+}
+
+# Fija IMAGEN, BASE_IMG, BASE_IMG_URL y OS_VARIANT a partir de --imagen. Con
+# --base, IMAGEN se deduce más tarde del propio fichero (deducir_imagen_de_base).
+elegir_imagen() {
+    local gluster=false
+    if $GLUSTERFS || $CLUSTER; then gluster=true; fi
+
+    if [[ -n "$BASE_OPT" ]]; then
+        BASE_IMG="${SILO_DIR}/${BASE_OPT}"
+        BASE_IMG_URL=""
+        return 0
+    fi
+
+    IMAGEN="$IMAGEN_OPT"
+    if [[ -z "$IMAGEN" ]]; then
+        if $gluster; then IMAGEN="$IMAGEN_DEFECTO_GLUSTER"; else IMAGEN="$IMAGEN_DEFECTO"; fi
+    fi
+
+    case "$IMAGEN" in
+        noble)
+            BASE_IMG="$SILO_DIR/$IMAGEN_NOBLE"
+            BASE_IMG_URL="$URL_NOBLE"
+            ;;
+        debian12)
+            BASE_IMG="$SILO_DIR/$IMAGEN_DEBIAN"
+            BASE_IMG_URL="$URL_DEBIAN"
+            ;;
+        ubuntu-base)
+            if ! $gluster; then
+                error 10 "--imagen ubuntu-base solo sirve para la imagen base GlusterFS (--glusterfs o
+--gluster-cluster). Para una máquina suelta usa noble (Ubuntu 24.04) o debian12."
+            fi
+            BASE_IMG="$UBUNTU_BASE_COMPARTIDA"
+            BASE_IMG_URL=""
+            ;;
+        *)
+            error 10 "La imagen '$IMAGEN' (--imagen) no existe. Elige una de estas:
+  noble        Ubuntu 24.04 (por defecto)
+  debian12     Debian 12
+  ubuntu-base  la del boletín 1, solo para la base GlusterFS"
+            ;;
+    esac
+    OS_VARIANT="$(variante_de_imagen "$IMAGEN")"
+}
+
+# Con --base: de qué imagen sale el fichero. Se mira la última imagen de su
+# cadena de respaldo: una imagen cloud de Debian o de Ubuntu, o, si el fichero
+# no es copia de nada, una copia completa de ubuntu-base (lo que hace el
+# boletín con gluster-base.qcow2, y el script con --glusterfs).
+deducir_imagen_de_base() {
+    local cadena raiz
+    cadena="$(qemu-img info -U --backing-chain --output=json "$BASE_IMG" 2>/dev/null || true)"
+    raiz="$(jq -r 'if type == "array" then .[-1].filename else .filename end // empty' <<< "$cadena" 2>/dev/null || true)"
+    raiz="$(basename "${raiz:-$BASE_IMG}")"
+    case "${raiz,,}" in
+        *debian*)            IMAGEN="debian12" ;;
+        noble*|*cloudimg*)   IMAGEN="noble" ;;
+        *)                   IMAGEN="ubuntu-base" ;;
+    esac
+    OS_VARIANT="$(variante_de_imagen "$IMAGEN")"
+}
+
+########################################
 # Imagen base: si no está, se descarga; si está, se comprueba
 ########################################
 descargar_imagen_base() {
-    local tmp="${BASE_IMG}.descargando"
+    local tmp="${BASE_IMG}.descargando" tam="unos 600 MB"
+    if [[ "$IMAGEN" == debian12 ]]; then tam="unos 430 MB"; fi
 
     echo "→ No está $(basename "$BASE_IMG") en el silo. Se descarga de:"
-    echo "  $BASE_IMG_URL  (unos 430 MB; puede tardar un rato)"
+    echo "  $BASE_IMG_URL  ($tam; puede tardar un rato)"
 
     # Se descarga a un nombre temporal y solo se renombra si termina bien:
     # así una descarga a medias nunca se confunde con la imagen.
@@ -394,6 +482,10 @@ Elige otra imagen o cambia el nombre de la máquina."
             error 10 "El disco que se crearía se llama $(basename "$BASE_IMG"), que es la imagen de la que
 salen todas las máquinas. Ponle otro nombre a la máquina (p.ej. server1)."
         fi
+        if imagen_protegida "$f"; then
+            error 10 "El disco que se crearía se llama $(basename "$f"), que es una de las imágenes cloud de
+las que salen las máquinas. Ponle otro nombre a la máquina (p.ej. server1)."
+        fi
     done
 }
 
@@ -412,6 +504,11 @@ comprobar_tam_disco() {
         *) return 0 ;;
     esac
     if (( tam_b < vs )); then
+        # Sin --tam, el disco toma el tamaño de la imagen (ubuntu-base tiene 64G)
+        if ! $TAM_EXPLICITO; then
+            TAM_DISCO="$(( (vs + 1073741823) / 1073741824 ))G"
+            return 0
+        fi
         error 15 "El tamaño --tam $TAM_DISCO es menor que el de la imagen $(basename "$BASE_IMG") ($(( (vs + 1073741823) / 1073741824 )) GiB):
 la copia quedaría truncada y la máquina no arrancaría bien. Indica un tamaño igual o mayor."
     fi
@@ -437,6 +534,19 @@ Mira qué imágenes tienes con: ls $SILO_DIR/*.qcow2"
             error 39 "La imagen $BASE_IMG la tiene abierta para escribir una máquina en ejecución.
 Apágala (o elimina su dominio) antes de usarla como imagen base: las copias de un disco
 que se está escribiendo quedarían corruptas."
+        fi
+        deducir_imagen_de_base
+        return 0
+    fi
+
+    # ubuntu-base: la dejan los profesores en el servidor; no se descarga
+    if [[ "$IMAGEN" == ubuntu-base ]]; then
+        local fmt_u
+        fmt_u="$(qemu-img info -U --output=json "$BASE_IMG" 2>/dev/null | jq -r '.format // empty' 2>/dev/null || true)"
+        if [[ ! -r "$BASE_IMG" || "$fmt_u" != "qcow2" ]]; then
+            error 39 "No encuentro la imagen ubuntu-base del boletín 1 en $BASE_IMG
+(o no se puede leer, o no es un qcow2). En los servidores de la asignatura está ahí.
+Si no la tienes, construye la base a partir de una imagen cloud: --imagen noble"
         fi
         return 0
     fi

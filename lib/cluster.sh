@@ -1,19 +1,22 @@
 ########################################
-# Infraestructura GlusterFS completa (apartado A.3.2 del manual)
+# Infraestructura GlusterFS completa (boletín 2, epígrafe 2.4)
 #
-# Dos fases, las mismas que describe el manual, pero todo con cloud-init:
+# Dos fases, las mismas que describe el boletín, pero todo con cloud-init:
 #
-#   Fase 1  Se crea una máquina base con glusterfs-server instalado, glusterd
-#           habilitado y el machine-id vacío; se espera a que termine, se
-#           apaga y se elimina su dominio conservando el disco.
+#   Fase 1  Base gluster-base.qcow2: por defecto, una copia COW de la imagen
+#           cloud de Ubuntu (la misma que SERVER1); con --imagen ubuntu-base,
+#           una copia de ubuntu-base.qcow2, como en la construcción manual
+#           (apartado 2.4 b). Se arranca con glusterfs-server
+#           instalado, glusterd habilitado y el machine-id vacío; se espera a
+#           que termine, se apaga y se elimina su dominio conservando el disco.
 #   Fase 2  Cada nodo es una copia COW de ese disco con sus discos extra
 #           conectados desde el primer arranque. Un instance-id nuevo hace
 #           que cloud-init lo personalice: IP fija, /etc/hosts, discos xfs
 #           montados. Los nodos arrancan en paralelo y se espera a todos.
 #
 # Frente a crea-entorno.sh no hace falta virt-customize (el error 'supermin'
-# del apartado B.5 desaparece), ni virt-format, ni xmllint; cada nodo tiene
-# sus propias claves SSH de host, y las IPs se validan contra el DHCP real.
+# desaparece), ni virt-format, ni xmllint; cada nodo tiene sus propias claves
+# SSH de host, y las IPs se validan contra el DHCP real.
 ########################################
 
 # Quita un dominio del registro de creados (cuando se elimina a propósito)
@@ -33,6 +36,23 @@ disco_base_cluster() {
         echo "${SILO_DIR}/${BASE_OPT}"
     else
         echo "${SILO_DIR}/${PREFIJO_FICHERO}${CLUSTER_BASE}.qcow2"
+    fi
+}
+
+# "vdb, vdc y vdd en xfs, montados en /gluster1 /gluster2 /gluster3"
+texto_discos_montados() {
+    local n=${#CLUSTER_MONTAJES[@]}
+    local -a u=( "${UNIDADES_CLUSTER[@]:0:$n}" )
+    printf '%s y %s en xfs, montados en %s' "$(IFS=,; echo "${u[*]:0:n-1}" | sed 's/,/, /g')" "${u[-1]}" "${CLUSTER_MONTAJES[*]}"
+}
+
+# "; vde..vdh sin formatear" (nada si solo están los que se montan)
+texto_discos_sin_formatear() {
+    local n=${#CLUSTER_MONTAJES[@]}
+    if (( ${#UNIDADES_CLUSTER[@]} == n + 1 )); then
+        printf '; %s sin formatear' "${UNIDADES_CLUSTER[$n]}"
+    elif (( ${#UNIDADES_CLUSTER[@]} > n + 1 )); then
+        printf '; %s..%s sin formatear' "${UNIDADES_CLUSTER[$n]}" "${UNIDADES_CLUSTER[-1]}"
     fi
 }
 
@@ -57,8 +77,8 @@ objetivos_cluster() {
 ########################################
 # Base GlusterFS: crea la máquina, espera a que cloud-init termine, la apaga
 # y elimina el dominio. Queda solo el disco, listo para hacer copias COW.
-# Es lo que describen los pasos 3 a 5 del procedimiento del apéndice A.3.2,
-# y lo usan tanto --glusterfs como la fase 1 de --gluster-cluster.
+# Es lo que describen los apartados 2.4 a) y b) del boletín 2, y lo usan
+# tanto --glusterfs como la fase 1 de --gluster-cluster.
 #   crear_base_gluster DOMINIO HOSTNAME DISCO
 ########################################
 crear_base_gluster() {
@@ -128,6 +148,7 @@ mostrar_plan_cluster() {
     for i in "${!CLUSTER_NODOS[@]}"; do
         echo "      ${PREFIJO_DOMINIO}-${CLUSTER_NODOS[$i]}  →  ${CLUSTER_IPS[$i]}"
     done
+    echo "    Sistema : $(descripcion_imagen "$IMAGEN"); variante $OS_VARIANT"
     echo "    Recursos: ${RAM_MB} MB y ${VCPUS} vCPU por máquina"
     avisar_imagen_falta
     echo
@@ -136,7 +157,7 @@ mostrar_plan_cluster() {
         echo "Fase 1: se omite. Los nodos partirán de la imagen que ya existe: $(basename "$base_disco")"
     else
         echo "Fase 1: base GlusterFS"
-        echo "    Máquina $base_vm con disco $(basename "$base_disco") (COW de $(basename "$BASE_IMG"), $TAM_DISCO)."
+        echo "    Máquina $base_vm con disco $(basename "$base_disco") ($(origen_disco_principal "$BASE_IMG"), $TAM_DISCO)."
         echo "    Instala glusterfs-server (y las herramientas para formatear en xfs), habilita glusterd, vacía el machine-id."
         echo "    Al terminar se apaga y se elimina el dominio; el disco se conserva como respaldo."
         generar_cloudinit "$base_vm" "$CLUSTER_BASE" "" gluster
@@ -148,7 +169,7 @@ mostrar_plan_cluster() {
     echo
 
     echo "Fase 2: ${#CLUSTER_NODOS[@]} nodos, cada uno con ${#UNIDADES_CLUSTER[@]} discos extra de ${TAM_DISCO_EXTRA}"
-    echo "    ${UNIDADES_CLUSTER[0]}, ${UNIDADES_CLUSTER[1]} y ${UNIDADES_CLUSTER[2]} en xfs, montados en ${CLUSTER_MONTAJES[*]}; el resto sin formatear."
+    echo "    $(texto_discos_montados)$(texto_discos_sin_formatear)."
     for i in "${!CLUSTER_NODOS[@]}"; do
         host="${CLUSTER_NODOS[$i]}"
         vm="${PREFIJO_DOMINIO}-${host}"
@@ -183,8 +204,9 @@ print_summary_cluster() {
         printf '  %-28s %-16s hostname %s\n' "$vm" "$ip" "$host"
     done
     echo "RAM / vCPUs  : ${RAM_MB} MB / ${VCPUS} por nodo"
+    echo "Sistema      : $(descripcion_imagen "$IMAGEN")"
     echo "Discos       : ${UNIDADES_CLUSTER[0]}..${UNIDADES_CLUSTER[-1]} (${#UNIDADES_CLUSTER[@]} × ${TAM_DISCO_EXTRA}) en cada nodo"
-    echo "               ${UNIDADES_CLUSTER[0]}, ${UNIDADES_CLUSTER[1]} y ${UNIDADES_CLUSTER[2]} en xfs, montados en ${CLUSTER_MONTAJES[*]}"
+    echo "               $(texto_discos_montados)$(texto_discos_sin_formatear)"
     echo "GlusterFS    : glusterfs-server instalado y glusterd habilitado en todos"
     echo "/etc/hosts   : con los ${#CLUSTER_NODOS[@]} nombres, en todos"
     echo
@@ -195,7 +217,7 @@ print_summary_cluster() {
     echo "IMPORTANTE: no borres $base_disco."
     echo "            Los discos de los ${#CLUSTER_NODOS[@]} nodos dependen de él."
     echo
-    echo "Para eliminar la infraestructura entera (nodos${BASE_OPT:+ }${BASE_OPT:-e imagen base}):"
+    echo "Para eliminar la infraestructura entera (nodos${BASE_OPT:- e imagen base}):"
     echo "  $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--eliminar ${CLUSTER_NODOS[*]}${BASE_OPT:+}${BASE_OPT:- $CLUSTER_BASE}"
     echo "-------------------------------------------"
 }

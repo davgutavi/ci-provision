@@ -97,11 +97,45 @@ opciones_a_argumentos() {   # SALIDA_DEL_CHECKLIST
             pass="$(wt --passwordbox $'Contraseña para administrador\n(solo letras sin tilde, números y signos básicos):' 10 70)" || return 1
             if [[ -z "$pass" ]]; then return 1; fi
             OPCIONES_ARGS+=( --ssh-pass "$pass" )
+        elif [[ "$o" == discos-crea-entorno ]]; then
+            OPCIONES_ARGS+=( --discos-nodo "${#UNIDADES_POSIBLES_NODO[@]}" )
         else
             OPCIONES_ARGS+=( "--$o" )
         fi
     done
     return 0
+}
+
+# on/off según si OPCION es la elegida (para los --radiolist)
+marca() {   # OPCION ELEGIDA
+    if [[ "$1" == "$2" ]]; then echo on; else echo off; fi
+}
+
+# Imagen de una máquina suelta. Deja --imagen en IMAGEN_ARGS (nada si es la
+# de por defecto); devuelve 1 si se cancela.
+IMAGEN_ARGS=()
+elegir_imagen_maquina() {   # PRESELECCIONADA
+    local img
+    IMAGEN_ARGS=()
+    img="$(wt --notags --radiolist $'Sistema de la máquina (marca con la barra espaciadora):' 11 76 2 \
+        noble    "Ubuntu 24.04 (boletín 2)" "$(marca noble "$1")" \
+        debian12 "Debian 12 (boletín 1)"    "$(marca debian12 "$1")")" || return 1
+    if [[ -n "$img" && "$img" != "$IMAGEN_DEFECTO" ]]; then
+        IMAGEN_ARGS=( --imagen "$img" )
+    fi
+}
+
+# De qué imagen sale la base GlusterFS (mismo convenio que la anterior)
+elegir_imagen_gluster() {
+    local img
+    IMAGEN_ARGS=()
+    img="$(wt --notags --radiolist $'¿De qué imagen sale la base GlusterFS?\n(marca con la barra espaciadora)' 13 78 3 \
+        noble       "Imagen cloud de Ubuntu 24.04, la misma que SERVER1 (recomendada)" on \
+        ubuntu-base "ubuntu-base.qcow2 del boletín 1, como la construcción manual" off \
+        debian12    "Imagen cloud de Debian 12" off)" || return 1
+    if [[ -n "$img" && "$img" != "$IMAGEN_DEFECTO_GLUSTER" ]]; then
+        IMAGEN_ARGS=( --imagen "$img" )
+    fi
 }
 
 asistente_maquina() {   # basica | extra (IP .2 sugerida y discos extra marcados)
@@ -122,6 +156,13 @@ asistente_maquina() {   # basica | extra (IP .2 sugerida y discos extra marcados
     fi
     ip="$(wt --inputbox "$texto" 16 70 "$sugerida")" || return 0
 
+    # El boletín 1 usa Debian 12; el 2, Ubuntu 24.04
+    if [[ "$modo" == basica ]]; then
+        elegir_imagen_maquina debian12 || return 0
+    else
+        elegir_imagen_maquina noble || return 0
+    fi
+
     marcado=off
     if [[ "$modo" == extra ]]; then marcado=on; fi
     sel="$(wt --checklist $'Opciones (marca con la barra espaciadora):' 16 76 5 \
@@ -132,27 +173,33 @@ asistente_maquina() {   # basica | extra (IP .2 sugerida y discos extra marcados
         limpiar        "Eliminar antes lo que ya exista con esos nombres" off)" || return 0
     opciones_a_argumentos "$sel" || return 0
 
-    args=( ${OPCIONES_ARGS[@]+"${OPCIONES_ARGS[@]}"} "$nombre" )
+    args=( ${IMAGEN_ARGS[@]+"${IMAGEN_ARGS[@]}"} ${OPCIONES_ARGS[@]+"${OPCIONES_ARGS[@]}"} "$nombre" )
     if [[ -n "$ip" ]]; then args+=( "$ip" ); fi
     ejecutar_asistente "${args[@]}"
 }
 
 asistente_cluster() {
-    local base sel
+    local base sel usar_base=false
     local -a args=( --gluster-cluster )
 
     base="${SILO_DIR}/${PREFIJO_FICHERO}${CLUSTER_BASE}.qcow2"
     if [[ -f "$base" ]]; then
         if wt --yesno "Ya tienes $(basename "$base") en el silo."$'\n¿Quieres usarla como imagen base, sin volver a construirla?' 10 70; then
             args+=( --base "$(basename "$base")" )
+            usar_base=true
         fi
     fi
+    if ! $usar_base; then
+        elegir_imagen_gluster || return 0
+        args+=( ${IMAGEN_ARGS[@]+"${IMAGEN_ARGS[@]}"} )
+    fi
 
-    sel="$(wt --checklist $'Opciones (marca con la barra espaciadora):' 14 76 4 \
-        limpiar        "Eliminar antes ${CLUSTER_NODOS[*]} si ya existen" off \
-        ssh-pass       "Contraseña para administrador y SSH por contraseña" off \
-        no-root        "No habilitar al usuario root" off \
-        no-virt-viewer "Sin consola gráfica (virt-viewer)" off)" || return 0
+    sel="$(wt --checklist $'Opciones (marca con la barra espaciadora):' 15 78 5 \
+        limpiar             "Eliminar antes ${CLUSTER_NODOS[*]} si ya existen" off \
+        discos-crea-entorno "${#UNIDADES_POSIBLES_NODO[@]} discos por nodo (vdb..vdh), como crea-entorno.sh" off \
+        ssh-pass            "Contraseña para administrador y SSH por contraseña" off \
+        no-root             "No habilitar al usuario root" off \
+        no-virt-viewer      "Sin consola gráfica (virt-viewer)" off)" || return 0
     opciones_a_argumentos "$sel" || return 0
 
     args+=( ${OPCIONES_ARGS[@]+"${OPCIONES_ARGS[@]}"} )
@@ -165,6 +212,8 @@ asistente_base() {
 
     nombre="$(wt --inputbox $'Nombre de la imagen base.\nQuedará NOMBRE.qcow2 en el silo, sin máquina, lista para hacer copias.' 11 70 "$CLUSTER_BASE")" || return 0
     if [[ -z "$nombre" ]]; then return 0; fi
+    elegir_imagen_gluster || return 0
+    args+=( ${IMAGEN_ARGS[@]+"${IMAGEN_ARGS[@]}"} )
     if wt --defaultno --yesno $'Si ya existe una máquina o un disco con ese nombre,\n¿eliminarlos antes (--limpiar)?' 9 70; then
         args+=( --limpiar )
     fi
@@ -191,7 +240,7 @@ asistente_listar() {
     while IFS= read -r f; do
         if [[ -z "$f" ]]; then continue; fi
         tipo="sin máquina"
-        if [[ "$f" == "$BASE_IMG" ]]; then tipo="imagen cloud"; fi
+        if imagen_protegida "$f"; then tipo="imagen cloud"; fi
         items+=( "d:$f" "$(rellenar "$(basename "$f")" 14) $(rellenar "$tipo" 12) $(descripcion_disco_suelto "$f")" )
     done < <(discos_sin_maquina)
 

@@ -7,8 +7,9 @@
 # 1. 🧠 ¿Qué hace este script?
 
 `ci-provision.sh` automatiza la **creación completa de máquinas virtuales**
-basadas en **Debian 12 cloud**, usando `virt-install` y `cloud-init`, en el
-servidor de la asignatura.
+basadas en la **imagen cloud de Ubuntu 24.04** (o, si lo pides, la de **Debian 12**),
+usando `virt-install` y `cloud-init`, en el servidor de la asignatura. Construye en
+un solo comando la infraestructura que necesitan los ejercicios del boletín 2.
 
 Todas las máquinas que crea tienen:
 
@@ -18,6 +19,7 @@ Todas las máquinas que crea tienen:
 - `qemu-guest-agent` instalado y zona horaria `Europe/Madrid`.
 
 ### ✔ Funcionalidades opcionales
+- `--imagen debian12`: parte de Debian 12 en lugar de Ubuntu 24.04 (la máquina del boletín 1).
 - `--extra-disks`: crea y conecta 6 discos `vdb`..`vdg` (infraestructura del boletín 2, epígrafe 2.1).
 - `--glusterfs`: construye una **imagen base GlusterFS**: instala `glusterfs-server`,
   habilita `glusterd`, vacía `/etc/machine-id` y, al terminar, apaga la máquina y
@@ -25,7 +27,7 @@ Todas las máquinas que crea tienen:
 - `--gluster-cluster`: construye **toda** la infraestructura del boletín 2, epígrafe 2.4
   (imagen base + `server1`..`server4`) en un solo comando.
 - `--base`: usa como imagen de partida una que ya tengas en el silo (por ejemplo,
-  tu imagen base GlusterFS), en lugar de `debian12.qcow2`.
+  tu imagen base GlusterFS), en lugar de la imagen cloud.
 - `--ssh-pass`: da una contraseña a `administrador` y permite entrar por SSH escribiéndola,
   en lugar de con tu clave pública.
 - `--no-root`: no habilita al usuario `root`.
@@ -59,31 +61,32 @@ Si tu red se llama de otra forma, el script la encontrará igualmente siempre qu
 empiece por tu nombre de usuario. Si tienes varias, o se llama de otro modo,
 indícala con `--red NOMBRE` (ver [opciones avanzadas](#opciones-avanzadas)).
 
-## **3. Imagen cloud de Debian 12**
+## **3. Imagen cloud de Ubuntu 24.04**
 
-Debe estar ubicada en el silo y llamarse **debian12.qcow2**:
+Debe estar ubicada en el silo con el nombre que le da el boletín 2,
+**noble-server-cloudimg-amd64.img**:
 
 ```
-$HOME/imagenesMV/debian12.qcow2
+$HOME/imagenesMV/noble-server-cloudimg-amd64.img
 ```
 
-**Si no está, el script la descarga** (unos 430 MB) la primera vez que lo
+**Si no está, el script la descarga** (unos 600 MB) la primera vez que lo
 ejecutes. Solo la guarda con ese nombre si la descarga termina bien y es una
 imagen válida.
 
-### Para obtenerla tú mismo, si lo prefieres:
+Si usas `--imagen debian12` (la máquina del boletín 1), la imagen es
+**debian12.qcow2** (unos 430 MB), y también la descarga el script si falta.
 
-**wget:**
+### Para obtenerlas tú mismo, si lo prefieres:
+
 ```bash
+wget https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img \
+     -O $HOME/imagenesMV/noble-server-cloudimg-amd64.img
 wget https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2 \
      -O $HOME/imagenesMV/debian12.qcow2
 ```
 
-**curl:**
-```bash
-curl -L https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2 \
-     -o $HOME/imagenesMV/debian12.qcow2
-```
+(con `curl`, cambia `wget … -O FICHERO` por `curl -L … -o FICHERO`)
 
 ## **4. Tu clave pública SSH**
 En `$HOME/.ssh/id_rsa.pub`. Si no la tienes, créala con `ssh-keygen`.
@@ -151,23 +154,25 @@ Ejecuta siempre desde tu silo:
 
 De `MAQUINA` (por ejemplo `server1`) salen el nombre del dominio en libvirt
 (`TU_USUARIO-server1`), el nombre de host (`server1`) y el disco principal
-(`server1.qcow2`), que el script crea en el silo como copia COW de `debian12.qcow2`.
+(`server1.qcow2`), que el script crea en el silo como copia COW de la imagen cloud
+(`noble-server-cloudimg-amd64.img`, o `debian12.qcow2` con `--imagen debian12`).
 
 ### Parámetros
 
 | Parámetro | Descripción | Por defecto |
 |-----------|-------------|-------------|
-| `MAQUINA` | Nombre corto de la máquina: `server1`, `server2`, `glusterbase`... Solo letras, números y guiones | obligatorio |
+| `MAQUINA` | Nombre corto de la máquina: `server1`, `server2`, `gluster-base`... Solo letras, números y guiones | obligatorio |
 | `IP` | IP fija dentro de tu red virtual | DHCP |
 
 ### Opciones
 
 | Opción | Descripción |
 |--------|-------------|
+| `--imagen IMAGEN` | Imagen de partida: `noble` (Ubuntu 24.04, por defecto) o `debian12` (Debian 12, la del boletín 1). Para la base GlusterFS hay además `ubuntu-base`, ver [infraestructura GlusterFS](#caso-cluster) |
 | `--extra-disks` | Crea y conecta 6 discos extra de 40G (`vdb`..`vdg`). Ver [SERVER1 del boletín 2](#caso-server1) |
 | `--glusterfs` | Construye una imagen base GlusterFS y deja solo el disco. Ver [solo la imagen base](#caso-imagen-base) |
 | `--gluster-cluster` | Construye la infraestructura completa del boletín 2, epígrafe 2.4. Ver [infraestructura GlusterFS](#caso-cluster) |
-| `--base FICHERO` | Imagen del silo de la que hacer la copia, en lugar de `debian12.qcow2`. Con `--gluster-cluster`, los nodos parten de ella y no se construye la base. Ver [si ya tienes tu imagen base](#caso-base-propia) |
+| `--base FICHERO` | Imagen del silo de la que hacer la copia, en lugar de la imagen cloud. Con `--gluster-cluster`, los nodos parten de ella y no se construye la base. No se combina con `--imagen`: el script deduce de qué sistema es. Ver [si ya tienes tu imagen base](#caso-base-propia) |
 | `--ssh-pass CONTRASEÑA` | Da esa contraseña a `administrador` y permite entrar por SSH escribiéndola. La eliges tú; solo caracteres ASCII. Con `--ssh-pass -` te la pide por teclado, sin que quede en el historial |
 | `--no-root` | No habilita al usuario `root` |
 | `--no-virt-viewer` | No habilita la consola gráfica. La consola de texto (`virsh console`) sigue funcionando |
@@ -215,7 +220,8 @@ explica.
 
 Muestra tus máquinas (las que empiezan por `TU_USUARIO-`), con su estado, su IP y
 sus discos, y después los discos del silo que no usa ninguna máquina (por ejemplo
-`glusterbase.qcow2`, que es la imagen de la que son copia los nodos).
+`gluster-base.qcow2`, que es la imagen de la que son copia los nodos, o las
+imágenes cloud).
 
 ```bash
 ./ci-provision.sh --eliminar server1
@@ -227,7 +233,7 @@ confirmación. Puedes indicar varias máquinas a la vez; para deshacer la
 infraestructura GlusterFS entera:
 
 ```bash
-./ci-provision.sh --eliminar server1 server2 server3 server4 glusterbase
+./ci-provision.sh --eliminar server1 server2 server3 server4 gluster-base
 ```
 
 Nunca borra un disco que esté usando otra máquina, ni una imagen de la que dependan
@@ -238,8 +244,9 @@ otras copias: en ese caso lo conserva y te dice por qué.
 ```
 
 Elimina todas tus máquinas con sus discos y, en una segunda pregunta, los discos del
-silo que queden sin máquina. `debian12.qcow2` no se toca nunca. Con `--dry-run`, las
-tres opciones solo enseñan lo que harían.
+silo que queden sin máquina. Las imágenes cloud (`noble-server-cloudimg-amd64.img` y
+`debian12.qcow2`) no se tocan nunca. Con `--dry-run`, las tres opciones solo enseñan
+lo que harían.
 
 ---
 
@@ -258,7 +265,7 @@ tres opciones solo enseñan lo que harían.
 
 ## 🟦 **1️⃣ Máquina básica**
 
-### **Con DHCP**
+### **Ubuntu 24.04 con DHCP**
 
 ```bash
 ./ci-provision.sh server1
@@ -268,6 +275,12 @@ tres opciones solo enseñan lo que harían.
 
 ```bash
 ./ci-provision.sh server1 192.168.XXX.2
+```
+
+### **Debian 12, como la del boletín 1**
+
+```bash
+./ci-provision.sh --imagen debian12 server1 192.168.XXX.2
 ```
 
 ### **Permitiendo además entrar por SSH con contraseña**
@@ -286,6 +299,16 @@ tres opciones solo enseñan lo que harían.
 ```bash
 ./ci-provision.sh --extra-disks server1 192.168.XXX.2
 ```
+
+Crea `usuario-server1`, con Ubuntu 24.04, hostname `server1`, la IP `.2` de tu red
+y seis discos de 40G en el silo, `server1-vdb.qcow2`..`server1-vdg.qcow2`,
+conectados como `vdb`..`vdg`. Queda lista para todo el resto del bloque:
+
+- puedes tomar y revertir **instantáneas** (`virsh snapshot-create-as … --atomic`)
+  en cuanto el script termina, encendida o apagada;
+- `root` tiene la contraseña `s1st3mas` en la consola, que es la que te pedirá la
+  máquina si arranca en **modo de rescate** (epígrafe 2.3);
+- `apt` funciona, para instalar lo que pidan los ejercicios (por ejemplo, `lvm2`).
 
 ### **Si `server1` ya existía y quieres rehacerla desde cero**
 
@@ -306,21 +329,37 @@ tres opciones solo enseñan lo que harían.
 
 Crea, en dos fases:
 
-1. **Una imagen base** `glusterbase.qcow2`, con `glusterfs-server` instalado,
-   `glusterd` habilitado y el `machine-id` vacío. Se construye en una máquina
-   provisional (`usuario-glusterbase`) que, al terminar, se apaga y se elimina;
-   el disco **se conserva**, porque los nodos son copias COW de él.
+1. **Una imagen base** `gluster-base.qcow2` (Ubuntu 24.04, copia COW de la misma
+   imagen cloud que SERVER1), con `glusterfs-server` instalado, `glusterd`
+   habilitado, la zona horaria `Europe/Madrid` y el `machine-id` vacío. Se
+   construye en una máquina provisional (`usuario-gluster-base`) que, al terminar,
+   se apaga y se elimina; el disco **se conserva**, porque los nodos son copias
+   COW de él.
 2. **Cuatro nodos** `usuario-server1`..`usuario-server4`, cada uno con:
    - IP fija `192.168.XXX.10`, `.11`, `.12` y `.13`
    - `/etc/hosts` con los cuatro nombres
-   - 7 discos extra de 40G (`vdb`..`vdh`); `vdb`, `vdc` y `vdd` formateados en xfs
-     y montados en `/gluster1`, `/gluster2` y `/gluster3` desde `/etc/fstab`
+   - 3 discos extra de 40G (`vdb`, `vdc` y `vdd`), formateados en xfs y montados
+     en `/gluster1`, `/gluster2` y `/gluster3` desde `/etc/fstab`
+   - `glusterd` en marcha, su propio `machine-id` y el cliente de Gluster
    - 1 vCPU y 1 GB de RAM
 
 Los cuatro nodos arrancan en paralelo y el script espera a que todos terminen.
 En total tarda unos tres minutos.
 
-> ⚠️ **No borres `glusterbase.qcow2`** mientras existan los nodos.
+> ⚠️ **No borres `gluster-base.qcow2`** mientras existan los nodos.
+
+### **Variantes**
+
+```bash
+./ci-provision.sh --gluster-cluster --discos-nodo 7          # 7 discos por nodo (vdb..vdh), como crea-entorno.sh
+./ci-provision.sh --gluster-cluster --imagen ubuntu-base     # base hecha como en la construcción manual del boletín
+```
+
+Con `--imagen ubuntu-base`, la base es una **copia completa** (64G) de
+`/home/ssoo-shared/ubuntu-base.qcow2`, la imagen del boletín 1, y en los nodos
+`administrador` conserva la contraseña de esa imagen (que `sudo` pide); el script
+solo le añade tu clave pública. Con `--discos-nodo`, solo los tres primeros discos
+se formatean y se montan.
 
 ### **Si ya tenías máquinas de otros ejercicios**
 
@@ -339,23 +378,23 @@ como copias de la imagen que indiques, que **no se toca** (ni siquiera con
 `--limpiar`). Tarda alrededor de un minuto.
 
 ```bash
-./ci-provision.sh --gluster-cluster --base glusterbase.qcow2
+./ci-provision.sh --gluster-cluster --base gluster-base.qcow2
 ```
 
 <a id="caso-imagen-base"></a>
 ### **Solo la imagen base**
 
 ```bash
-./ci-provision.sh --glusterfs glusterbase
+./ci-provision.sh --glusterfs gluster-base
 ```
 
-Deja `glusterbase.qcow2` en el silo, sin máquina. Después puedes crear los
-nodos con el comando anterior, o hacerlo tú siguiendo los apartados a, b, c y d
-del epígrafe 2.4 del boletín 2. Para crear una máquina suelta a partir de esa
-imagen también sirve `--base`:
+Deja `gluster-base.qcow2` en el silo, sin máquina. Después puedes crear los
+nodos con el comando anterior, o hacerlo tú siguiendo el epígrafe 2.4 del
+boletín 2. Para crear una máquina suelta a partir de esa imagen también sirve
+`--base`:
 
 ```bash
-./ci-provision.sh --base glusterbase.qcow2 server1 192.168.XXX.10
+./ci-provision.sh --base gluster-base.qcow2 server1 192.168.XXX.10
 ```
 
 ---
@@ -378,7 +417,11 @@ imagen también sirve `--base`:
 | Consola (`virsh console` / virt-viewer) | Ninguno | ✔ contraseña `s1st3mas` |
 
 Con `--no-root`, el usuario `root` queda sin contraseña y no se puede entrar con
-él por ningún medio. Con `--no-virt-viewer`, la máquina no tiene consola gráfica;
+él por ningún medio.
+
+En las máquinas hechas con `--imagen ubuntu-base`, `administrador` tiene además la
+contraseña de esa imagen (la del boletín 1), con la que puede entrar por SSH y por
+consola, y que `sudo` le pide. Con `--no-virt-viewer`, la máquina no tiene consola gráfica;
 `virsh console` sigue funcionando.
 
 ### Ejemplos
@@ -407,7 +450,9 @@ virt-viewer --connect qemu+ssh://usuario@soserver.lsi.us.es/system usuario-serve
 En el silo:
 
 ```
-server1.qcow2                     disco principal (copia COW de debian12.qcow2)
+noble-server-cloudimg-amd64.img   imagen cloud de Ubuntu 24.04 (la descarga el script)
+debian12.qcow2                    imagen cloud de Debian 12 (solo con --imagen debian12)
+server1.qcow2                     disco principal (copia COW de la imagen cloud)
 server1-vdb.qcow2 … server1-vdg.qcow2   discos extra, si se pidieron
 cloudinit-usuario-server1/
  ├── cip-user.yaml
@@ -420,8 +465,9 @@ usan los ejercicios del boletín (por ejemplo, `virsh detach-disk usuario-server
 $PWD/server1-vdb.qcow2`).
 
 Con `--gluster-cluster` se genera un directorio `cloudinit-*` por máquina (la
-base y cada nodo), y queda además `glusterbase.qcow2`, la imagen de la que son
-copia los cuatro nodos. Con `--dry-run`, los ficheros van a `cloudinit-*.dry-run/`;
+base y cada nodo), los discos `server1.qcow2`..`server4.qcow2` con sus
+`serverN-vdb.qcow2`..`serverN-vdd.qcow2`, y queda además `gluster-base.qcow2`, la
+imagen de la que son copia los cuatro nodos. Con `--dry-run`, los ficheros van a `cloudinit-*.dry-run/`;
 esos directorios los puedes borrar cuando quieras.
 
 > ⚠️ Los ficheros `cloudinit-*` contienen las contraseñas en texto plano, así que
@@ -434,10 +480,10 @@ esos directorios los puedes borrar cuando quieras.
 
 | Código | Descripción | Solución |
 |--------|-------------|-----------|
-| **10** | Faltan o sobran parámetros, u opciones incompatibles | Revisa la sintaxis: `MAQUINA [IP]` |
+| **10** | Faltan o sobran parámetros, opciones incompatibles, una `--imagen` que no existe o una máquina llamada como una imagen cloud | Revisa la sintaxis: `MAQUINA [IP]` |
 | **11** | Falta el valor de una opción, o está vacío | Escríbelo después de la opción, separado por un espacio |
 | **12** | Opción desconocida, obsoleta o escrita con `=` | Consulta `-h`; las opciones van separadas de su valor por un espacio |
-| **13** | RAM o vCPUs no válidas | Números; mínimo 512 MB y 1 vCPU |
+| **13** | RAM, vCPUs o `--discos-nodo` no válidos | Números; mínimo 512 MB y 1 vCPU; de 3 a 7 discos por nodo |
 | **14** | Contraseña con caracteres no ASCII | Sin tildes ni `ñ`: no podrías teclearla en la consola |
 | **15** | Tamaño de disco no válido, o menor que la imagen de partida | Formato `40G`, `20G`, `512M`; nunca menor que la imagen |
 | **16** | Nombre de disco o de imagen no válido | Solo el nombre del fichero, sin rutas |
@@ -448,7 +494,7 @@ esos directorios los puedes borrar cuando quieras.
 | **31** | No existe la clave pública, o el fichero no contiene una sola clave | `ssh-keygen` |
 | **37** | No se ha podido descargar la imagen base, o la que hay está corrupta | El mensaje indica el `wget` manual, o el `rm` para que el script la vuelva a descargar |
 | **38** | Faltan herramientas (incluido `wget`/`curl` para descargar la imagen, o `whiptail` para `--menu`) o no hay conexión con libvirt | Avisar al profesor |
-| **39** | La imagen indicada con `--base` no existe o no es un `qcow2` | Revisa el nombre; debe estar en el silo |
+| **39** | La imagen indicada con `--base` no existe o no es un `qcow2`, o no está `/home/ssoo-shared/ubuntu-base.qcow2` (con `--imagen ubuntu-base`) | Revisa el nombre; debe estar en el silo. Sin ubuntu-base, usa la imagen por defecto |
 | **40** | No se encuentra tu red virtual, o el nombre dado a `--red` no es válido | Créala con el nombre `TU_USUARIO-red`, o usa `--red` |
 | **41** | IP no válida o fuera de tu red | El mensaje indica las IPs libres de tu red |
 | **42** | IP ocupada por DHCP o reservada | El mensaje indica las IPs libres de tu red |
@@ -472,7 +518,8 @@ No las necesitas en los [casos de uso](#casos-de-uso).
 | `--red NOMBRE` | Red virtual a usar, si no se llama `TU_USUARIO-red` o tienes varias |
 | `--prefijo PREFIJO` | Sustituye a tu usuario en los nombres de todo lo que crea el script (dominios y discos). Ver abajo |
 | `--disco NOMBRE` | Nombre del disco principal (por defecto `MAQUINA.qcow2`) |
-| `--tam TAMAÑO` | Tamaño del disco principal (por defecto `40G`) |
+| `--tam TAMAÑO` | Tamaño del disco principal (por defecto `40G`, o el de la imagen de partida si es mayor) |
+| `--discos-nodo N` | Discos extra por nodo del clúster, de 3 a 7 (por defecto 3; con 7, como `crea-entorno.sh`) |
 | `--ram MB` | Memoria (por defecto 2048; en el clúster, 1024 por nodo) |
 | `--vcpus N` | vCPUs (por defecto 2; en el clúster, 1 por nodo) |
 
@@ -505,7 +552,7 @@ disponibles.
 Por defecto las máquinas se llaman `TU_USUARIO-MAQUINA` y los discos `MAQUINA.qcow2`.
 Con `--prefijo PREFIJO`, el prefijo sustituye a tu usuario en **todo lo que crea el
 script**: dominios `PREFIJO-MAQUINA`, discos `PREFIJO-MAQUINA.qcow2` y
-`PREFIJO-MAQUINA-vdb.qcow2`, imagen base `PREFIJO-glusterbase.qcow2` y directorios
+`PREFIJO-MAQUINA-vdb.qcow2`, imagen base `PREFIJO-gluster-base.qcow2` y directorios
 `cloudinit-PREFIJO-*`. Así puedes tener dos juegos de máquinas en el mismo silo sin
 que se pisen, y `--limpiar` nunca toca los del otro prefijo. El hostname (`server1`) y
 la red no cambian. Si además usas `--disco`, ese nombre manda tal cual, sin prefijo.
@@ -514,7 +561,7 @@ la red no cambian. Si además usas `--disco`, ese nombre manda tal cual, sin pre
 ./ci-provision.sh --prefijo demo --gluster-cluster
 ```
 
-crea `demo-glusterbase.qcow2` y `demo-server1`..`demo-server4` (con `demo-server1.qcow2`,
+crea `demo-gluster-base.qcow2` y `demo-server1`..`demo-server4` (con `demo-server1.qcow2`,
 `demo-server1-vdb.qcow2`, etc.) dejando intactos tus `TU_USUARIO-server1`..`4`.
 
 ---

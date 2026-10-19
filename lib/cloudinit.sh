@@ -53,6 +53,13 @@ eject_cloudinit_media() {
     fi
 }
 
+# Escalar YAML entre comillas simples (dentro, la comilla simple se duplica):
+# así una contraseña con ':', '#' o espacios no rompe el user-data
+yaml_comillas() {
+    local q="'"
+    printf "'%s'" "${1//$q/$q$q}"
+}
+
 ########################################
 # Generación de ficheros cloud-init
 #
@@ -107,38 +114,54 @@ EOF
     ########################################
     local i
 
+    # Solo se usan claves vigentes en el cloud-init de Ubuntu 24.04: con una
+    # obsoleta (p.ej. 'chpasswd: list:' o 'ssh-authorized-keys') termina en
+    # 'degraded done', que el script trata como error.
     {
         echo "#cloud-config"
         echo "users:"
         echo "  - name: administrador"
-        echo "    groups: [sudo]"
-        echo "    shell: /bin/bash"
-        echo "    sudo: ['ALL=(ALL) NOPASSWD:ALL']"
-        echo "    ssh-authorized-keys:"
+        if [[ "$IMAGEN" == ubuntu-base ]]; then
+            # En ubuntu-base 'administrador' ya existe, con la contraseña del
+            # boletín 1, y sudo se la pide: se deja como está (lock_passwd: false
+            # para que cloud-init no la bloquee) y solo se añade la clave
+            echo "    lock_passwd: false"
+        else
+            echo "    groups: [sudo]"
+            echo "    shell: /bin/bash"
+            echo "    sudo: ['ALL=(ALL) NOPASSWD:ALL']"
+        fi
+        echo "    ssh_authorized_keys:"
         echo "      - $PUBKEY"
 
         # root tiene contraseña para poder entrar por consola (por SSH no
-        # entra: sshd de Debian trae PermitRootLogin prohibit-password).
-        # 'administrador' solo la tiene si se pide --ssh-pass; si no, entra
-        # únicamente por SSH con su clave, igual que en las máquinas que se
-        # crean a mano siguiendo el manual.
+        # entra: el sshd de Debian y el de Ubuntu traen PermitRootLogin
+        # prohibit-password). Hace falta, p.ej., en el modo de rescate del
+        # epígrafe 2.3 del boletín 2. 'administrador' solo la tiene si se pide
+        # --ssh-pass; si no, entra únicamente por SSH con su clave, igual que
+        # en las máquinas que se crean a mano siguiendo el boletín.
         if [[ -n "$SSH_PASS" ]] || ! $NO_ROOT; then
             echo "chpasswd:"
-            echo "  list: |"
+            echo "  expire: false"
+            echo "  users:"
             if [[ -n "$SSH_PASS" ]]; then
-                echo "    administrador:${SSH_PASS}"
+                echo "    - name: administrador"
+                echo "      password: $(yaml_comillas "$SSH_PASS")"
+                echo "      type: text"
             fi
             if ! $NO_ROOT; then
-                echo "    root:${PASS_CONSOLA}"
+                echo "    - name: root"
+                echo "      password: ${PASS_CONSOLA}"
+                echo "      type: text"
             fi
-            echo "  expire: false"
         fi
 
         # SSH por contraseña solo si el alumno lo pide explícitamente. Se fija
-        # también el 'false' para no depender del valor por defecto de la imagen.
+        # también el 'false' para no depender del valor por defecto de la
+        # imagen, salvo en ubuntu-base, que lo trae activado y se respeta.
         if [[ -n "$SSH_PASS" ]]; then
             echo "ssh_pwauth: true"
-        else
+        elif [[ "$IMAGEN" != ubuntu-base ]]; then
             echo "ssh_pwauth: false"
         fi
 
@@ -197,6 +220,10 @@ EOF
                 echo "  - echo '/dev/${UNIDADES_CLUSTER[$i]} ${CLUSTER_MONTAJES[$i]} xfs ${OPCIONES_FSTAB_CLUSTER} 0 0' >> /etc/fstab"
             done
             echo "  - mount -a"
+        fi
+        if [[ "$IMAGEN" == ubuntu-base ]] && $NO_ROOT; then
+            # ubuntu-base trae root con contraseña: --no-root la bloquea
+            echo "  - passwd -l root"
         fi
         echo "  - timedatectl set-timezone Europe/Madrid"
         if [[ "$modo" == "gluster" ]]; then

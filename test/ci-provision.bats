@@ -131,57 +131,68 @@ qinfo() {
 }
 
 @test "sin imagen base: la descarga y continúa" {
-    rm -f "$SILO/debian12.qcow2"
+    rm -f "$SILO/noble-server-cloudimg-amd64.img"
     run bash "$SCRIPT" --no-wait server1
     assert_success
     assert_output --partial "Se descarga de:"
     assert_output --partial "Imagen base descargada"
+    [ "$(llamadas '^wget .*cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img')" -eq 1 ]
+    [ "$(qinfo "$SILO/noble-server-cloudimg-amd64.img" '.format')" = "qcow2" ]
+    [ ! -e "$SILO/noble-server-cloudimg-amd64.img.descargando" ]
+    [ "$(qinfo "$SILO/server1.qcow2" '."backing-filename"')" = "noble-server-cloudimg-amd64.img" ]
+    [ "$(qinfo "$SILO/server1.qcow2" '."backing-filename-format"')" = "qcow2" ]
+}
+
+@test "--imagen debian12: descarga la imagen de Debian si falta y declara la variante debian12" {
+    rm -f "$SILO/debian12.qcow2"
+    run bash "$SCRIPT" --no-wait --imagen debian12 server1
+    assert_success
+    assert_output --partial "Debian 12"
     [ "$(llamadas '^wget .*debian-12-generic-amd64.qcow2')" -eq 1 ]
-    [ "$(qinfo "$SILO/debian12.qcow2" '.format')" = "qcow2" ]
-    [ ! -e "$SILO/debian12.qcow2.descargando" ]
     [ "$(qinfo "$SILO/server1.qcow2" '."backing-filename"')" = "debian12.qcow2" ]
+    grep -q -- '--os-variant debian12' "$MOCK_STATE/log"
 }
 
 @test "sin imagen base y --dry-run: avisa de que la descargaría, sin descargar" {
-    rm -f "$SILO/debian12.qcow2"
+    rm -f "$SILO/noble-server-cloudimg-amd64.img"
     run bash "$SCRIPT" --dry-run server1
     assert_success
     assert_output --partial "se descargará de"
     [ "$(llamadas '^wget')" -eq 0 ]
-    [ ! -e "$SILO/debian12.qcow2" ]
+    [ ! -e "$SILO/noble-server-cloudimg-amd64.img" ]
 }
 
 @test "la descarga se hace después de las demás validaciones" {
-    rm -f "$SILO/debian12.qcow2"
+    rm -f "$SILO/noble-server-cloudimg-amd64.img"
     run bash "$SCRIPT" server1 192.168.7.200
     assert_failure 42
     [ "$(llamadas '^wget')" -eq 0 ]
 }
 
 @test "descarga fallida: error 37 con el comando manual y sin restos" {
-    rm -f "$SILO/debian12.qcow2"
+    rm -f "$SILO/noble-server-cloudimg-amd64.img"
     MOCK_WGET_FALLA=1 run bash "$SCRIPT" server1
     assert_failure 37
-    assert_output --partial "wget https://cloud.debian.org"
-    [ ! -e "$SILO/debian12.qcow2" ]
-    [ ! -e "$SILO/debian12.qcow2.descargando" ]
+    assert_output --partial "wget https://cloud-images.ubuntu.com"
+    [ ! -e "$SILO/noble-server-cloudimg-amd64.img" ]
+    [ ! -e "$SILO/noble-server-cloudimg-amd64.img.descargando" ]
     refute_output --partial "Deshaciendo"
 }
 
 @test "descarga corrupta (portal cautivo): error 37 y se elimina lo descargado" {
-    rm -f "$SILO/debian12.qcow2"
+    rm -f "$SILO/noble-server-cloudimg-amd64.img"
     MOCK_WGET_CORRUPTO=1 run bash "$SCRIPT" server1
     assert_failure 37
     assert_output --partial "se ha eliminado"
-    [ ! -e "$SILO/debian12.qcow2" ]
+    [ ! -e "$SILO/noble-server-cloudimg-amd64.img" ]
 }
 
 @test "imagen base existente que no es un qcow2: error 37 y NO se toca" {
-    echo "<html>404</html>" > "$SILO/debian12.qcow2"
+    echo "<html>404</html>" > "$SILO/noble-server-cloudimg-amd64.img"
     run bash "$SCRIPT" --dry-run server1
     assert_failure 37
-    assert_output --partial "rm $SILO/debian12.qcow2"
-    [ -e "$SILO/debian12.qcow2" ]
+    assert_output --partial "rm $SILO/noble-server-cloudimg-amd64.img"
+    [ -e "$SILO/noble-server-cloudimg-amd64.img" ]
 }
 
 @test "sin clave pública: error 31" {
@@ -353,9 +364,10 @@ qinfo() {
     run bash "$SCRIPT" server1
     assert_success
 
-    # Disco COW del tamaño por defecto
-    [ "$(qinfo "$SILO/server1.qcow2" '."backing-filename"')" = "debian12.qcow2" ]
+    # Disco COW de la imagen de Ubuntu, del tamaño por defecto
+    [ "$(qinfo "$SILO/server1.qcow2" '."backing-filename"')" = "noble-server-cloudimg-amd64.img" ]
     [ "$(qinfo "$SILO/server1.qcow2" '."virtual-size"')" = "42949672960" ]
+    [ "$(llamadas '--os-variant ubuntu24.04')" -eq 1 ]
 
     # Dominio creado con los parámetros por defecto
     dominio_existe "${USUARIO}-server1"
@@ -375,6 +387,7 @@ qinfo() {
     assert_output --partial "Medio de cloud-init expulsado"
     [ ! -e "$MOCK_STATE/dominios/${USUARIO}-server1/iso" ]
     assert_output --partial "IP           : 192.168.7.201 (DHCP)"
+    assert_output --partial "Sistema      : Ubuntu 24.04 (imagen cloud)"
     assert_output --partial "virsh console ${USUARIO}-server1"
 }
 
@@ -383,10 +396,13 @@ qinfo() {
     assert_success
     local u="$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
     grep -q "^#cloud-config" "$u"
-    ! grep -q "administrador:" "$u"
-    grep -q "root:s1st3mas" "$u"
+    # Sintaxis vigente de chpasswd (la de 'list:' deja cloud-init en 'degraded done')
+    [ "$(sed -n '/^chpasswd:/,/^[a-z]/p' "$u" | tr -s ' \n' ' ')" = "chpasswd: expire: false users: - name: root password: s1st3mas type: text ssh_pwauth: false " ]
+    ! grep -q "list:" "$u"
+    ! grep -q "ssh-authorized-keys" "$u"
+    grep -q "sudo: \['ALL=(ALL) NOPASSWD:ALL'\]" "$u"
     grep -q "^ssh_pwauth: false" "$u"
-    grep -q "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC0falsa" "$u"
+    grep -A1 "ssh_authorized_keys:" "$u" | grep -q "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC0falsa"
     grep -q "qemu-guest-agent" "$u"
     ! grep -q "glusterfs-server" "$u"
     grep -q "instance-id: ${USUARIO}-server1" "$SILO/cloudinit-${USUARIO}-server1/cip-meta.yaml"
@@ -397,7 +413,7 @@ qinfo() {
     run bash "$SCRIPT" --no-root server1
     assert_success
     local u="$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
-    ! grep -q "root:" "$u"
+    ! grep -q "name: root" "$u"
     ! grep -q "chpasswd" "$u"
     assert_output --partial "nadie entra por consola"
 }
@@ -414,18 +430,21 @@ qinfo() {
     run bash "$SCRIPT" --no-root --ssh-pass MiPass1 server1
     assert_success
     local u="$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
-    grep -q "administrador:MiPass1" "$u"
-    ! grep -q "root:" "$u"
+    grep -A1 "^    - name: administrador" "$u" | grep -q "password: 'MiPass1'"
+    ! grep -q "name: root" "$u"
 }
 
 @test "--base en una máquina suelta: copia COW de esa imagen, sin descargar nada" {
-    qemu-img create -f qcow2 "$SILO/mibase.qcow2" 3G >/dev/null
+    qemu-img create -f qcow2 -b noble-server-cloudimg-amd64.img -F qcow2 "$SILO/mibase.qcow2" 3G >/dev/null
     rm -f "$SILO/debian12.qcow2"
     run bash "$SCRIPT" --base mibase.qcow2 server1 192.168.7.10
     assert_success
     [ "$(qinfo "$SILO/server1.qcow2" '."backing-filename"')" = "mibase.qcow2" ]
     [ "$(llamadas '^wget')" -eq 0 ]
     assert_output --partial "copia COW de mibase.qcow2"
+    # Copia de la imagen de Ubuntu: variante ubuntu24.04 y administrador como en ella
+    [ "$(llamadas '--os-variant ubuntu24.04')" -eq 1 ]
+    grep -q "NOPASSWD" "$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
 }
 
 @test "--ssh-pass activa el SSH por contraseña con la contraseña elegida" {
@@ -433,8 +452,8 @@ qinfo() {
     assert_success
     local u="$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
     grep -q "^ssh_pwauth: true" "$u"
-    grep -q "administrador:MiPass1" "$u"
-    grep -q "root:s1st3mas" "$u"
+    grep -A1 "^    - name: administrador" "$u" | grep -q "password: 'MiPass1'"
+    grep -A1 "^    - name: root" "$u" | grep -q "password: s1st3mas"
     assert_output --partial "contraseña: MiPass1"
 }
 
@@ -464,9 +483,9 @@ qinfo() {
 }
 
 @test "--glusterfs: paquetes, orden de runcmd, y al final solo queda el disco" {
-    run bash "$SCRIPT" --glusterfs glusterbase
+    run bash "$SCRIPT" --glusterfs gluster-base
     assert_success
-    local u="$SILO/cloudinit-${USUARIO}-glusterbase/cip-user.yaml"
+    local u="$SILO/cloudinit-${USUARIO}-gluster-base/cip-user.yaml"
     grep -q "glusterfs-server" "$u"
     grep -q "xfsprogs" "$u"
     # enable glusterd antes de arrancar el agente; truncate del machine-id después
@@ -476,35 +495,74 @@ qinfo() {
 
     # Se espera, se apaga y se elimina el dominio; el disco se conserva
     [ "$(llamadas 'domifaddr')" -ge 1 ]
-    [ "$(llamadas "shutdown ${USUARIO}-glusterbase")" -eq 1 ]
-    [ "$(llamadas "undefine ${USUARIO}-glusterbase")" -eq 1 ]
-    ! dominio_existe "${USUARIO}-glusterbase"
-    [ "$(qinfo "$SILO/glusterbase.qcow2" '."backing-filename"')" = "debian12.qcow2" ]
+    [ "$(llamadas "shutdown ${USUARIO}-gluster-base")" -eq 1 ]
+    [ "$(llamadas "undefine ${USUARIO}-gluster-base")" -eq 1 ]
+    ! dominio_existe "${USUARIO}-gluster-base"
+    [ "$(qinfo "$SILO/gluster-base.qcow2" '."backing-filename"')" = "noble-server-cloudimg-amd64.img" ]
     assert_output --partial "Imagen base GlusterFS lista"
-    assert_output --partial "qemu-img create -f qcow2 -b glusterbase.qcow2"
+    assert_output --partial "qemu-img create -f qcow2 -b gluster-base.qcow2"
+}
+
+@test "--glusterfs --imagen ubuntu-base: copia completa de ubuntu-base, administrador como en ella" {
+    run bash "$SCRIPT" --imagen ubuntu-base --glusterfs gluster-base
+    assert_success
+    # Copia completa (sin respaldo), con el tamaño de ubuntu-base (64G) y sin
+    # tocar el original
+    [ "$(qinfo "$SILO/gluster-base.qcow2" '."backing-filename" // "ninguno"')" = "ninguno" ]
+    [ "$(qinfo "$SILO/gluster-base.qcow2" '."virtual-size"')" = "68719476736" ]
+    [ -e "$UBUNTU_BASE_COMPARTIDA" ]
+    [ "$(llamadas '--os-variant ubuntu24.04')" -eq 1 ]
+    assert_output --partial "copia completa de $UBUNTU_BASE_COMPARTIDA"
+    assert_output --partial "Ubuntu 24.04 (ubuntu-base.qcow2 del boletín 1)"
+    # administrador: solo se le añade la clave; su contraseña y su sudo, intactos
+    local u="$SILO/cloudinit-${USUARIO}-gluster-base/cip-user.yaml"
+    [ "$(sed -n '/^users:/,/^[a-z]/p' "$u" | tr -s ' \n' ' ')" = "users: - name: administrador lock_passwd: false ssh_authorized_keys: - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC0falsa ${USUARIO}@test chpasswd: " ]
+    ! grep -q "ssh_pwauth" "$u"
+    grep -A1 "^    - name: root" "$u" | grep -q "password: s1st3mas"
+}
+
+@test "--glusterfs --no-root con ubuntu-base: se bloquea la contraseña que trae root" {
+    run bash "$SCRIPT" --no-root --imagen ubuntu-base --glusterfs gluster-base
+    assert_success
+    grep -q "^  - passwd -l root" "$SILO/cloudinit-${USUARIO}-gluster-base/cip-user.yaml"
+    ! grep -q "chpasswd" "$SILO/cloudinit-${USUARIO}-gluster-base/cip-user.yaml"
+}
+
+@test "ubuntu-base: no se admite en una máquina suelta, y si no está, error 39" {
+    run bash "$SCRIPT" --dry-run --imagen ubuntu-base server1
+    assert_failure 10
+    assert_output --partial "solo sirve para la imagen base GlusterFS"
+    run bash "$SCRIPT" --dry-run --imagen fedora server1
+    assert_failure 10
+    rm -f "$UBUNTU_BASE_COMPARTIDA"
+    run bash "$SCRIPT" --dry-run --gluster-cluster --imagen ubuntu-base
+    assert_failure 39
+    assert_output --partial "--imagen noble"
+    [ "$(llamadas '^wget')" -eq 0 ]
 }
 
 @test "--glusterfs no admite --no-wait" {
-    run bash "$SCRIPT" --no-wait --glusterfs glusterbase
+    run bash "$SCRIPT" --no-wait --glusterfs gluster-base
     assert_failure 10
 }
 
 @test "--glusterfs: si cloud-init falla, error 71 y la máquina se conserva para examinarla" {
-    MOCK_CI_RESULT=error run bash "$SCRIPT" --glusterfs glusterbase
+    MOCK_CI_RESULT=error run bash "$SCRIPT" --glusterfs gluster-base
     assert_failure 71
     assert_output --partial "se conserva"
-    assert_output --partial "virsh console ${USUARIO}-glusterbase"
-    dominio_existe "${USUARIO}-glusterbase"
-    [ -e "$SILO/glusterbase.qcow2" ]
+    assert_output --partial "virsh console ${USUARIO}-gluster-base"
+    dominio_existe "${USUARIO}-gluster-base"
+    [ -e "$SILO/gluster-base.qcow2" ]
     refute_output --partial "Deshaciendo"
 }
 
 @test "--glusterfs: si no se puede consultar cloud-init, no se asume; error 70 y rollback" {
-    MOCK_EXEC_UNSUPPORTED=1 run bash "$SCRIPT" --glusterfs glusterbase
+    MOCK_EXEC_UNSUPPORTED=1 run bash "$SCRIPT" --glusterfs gluster-base
     assert_failure 70
     assert_output --partial "No se ha podido confirmar"
-    ! dominio_existe "${USUARIO}-glusterbase"
-    [ ! -e "$SILO/glusterbase.qcow2" ]
+    ! dominio_existe "${USUARIO}-gluster-base"
+    [ ! -e "$SILO/gluster-base.qcow2" ]
+    [ -e "$UBUNTU_BASE_COMPARTIDA" ]
 }
 
 @test "--disco y --tam cambian el nombre y el tamaño del disco principal" {
@@ -513,7 +571,7 @@ qinfo() {
     [ -e "$SILO/mio.qcow2" ]
     [ ! -e "$SILO/server1.qcow2" ]
     [ "$(qinfo "$SILO/mio.qcow2" '."virtual-size"')" = "21474836480" ]
-    assert_output --partial "mio.qcow2 (20G)"
+    assert_output --partial "mio.qcow2 (20G, copia COW de noble-server-cloudimg-amd64.img)"
 }
 
 @test "--prefijo: dominio y discos con prefijo; lo de tu usuario no se toca ni con --limpiar" {
@@ -533,17 +591,17 @@ qinfo() {
 }
 
 @test "--prefijo con --gluster-cluster: base y nodos con prefijo, hostnames intactos" {
-    touch "$SILO/glusterbase.qcow2" "$SILO/server1.qcow2"
+    touch "$SILO/gluster-base.qcow2" "$SILO/server1.qcow2"
     run bash "$SCRIPT" --prefijo demo --gluster-cluster
     assert_success
-    [ "$(llamadas '--name demo-glusterbase')" -eq 1 ]
+    [ "$(llamadas '--name demo-gluster-base')" -eq 1 ]
     [ "$(llamadas '--name demo-server')" -eq 4 ]
-    [ -e "$SILO/demo-glusterbase.qcow2" ]
-    [ "$(qinfo "$SILO/demo-server3.qcow2" '."backing-filename"')" = "demo-glusterbase.qcow2" ]
-    [ -e "$SILO/demo-server4-vdh.qcow2" ]
+    [ -e "$SILO/demo-gluster-base.qcow2" ]
+    [ "$(qinfo "$SILO/demo-server3.qcow2" '."backing-filename"')" = "demo-gluster-base.qcow2" ]
+    [ -e "$SILO/demo-server4-vdd.qcow2" ] && [ ! -e "$SILO/demo-server4-vde.qcow2" ]
     grep -q -r '^local-hostname: server2$' "$SILO/cloudinit-demo-server2/"
-    assert_output --partial "no borres $SILO/demo-glusterbase.qcow2"
-    [ -e "$SILO/glusterbase.qcow2" ] && [ -e "$SILO/server1.qcow2" ]
+    assert_output --partial "no borres $SILO/demo-gluster-base.qcow2"
+    [ -e "$SILO/gluster-base.qcow2" ] && [ -e "$SILO/server1.qcow2" ]
 }
 
 @test "--prefijo no válido: error 20; sin valor: error 11" {
@@ -562,9 +620,13 @@ qinfo() {
 }
 
 @test "combinaciones incompatibles: error 10 (y --disco igual a un disco extra: 16)" {
-    run bash "$SCRIPT" --dry-run --glusterfs --extra-disks glusterbase
+    run bash "$SCRIPT" --dry-run --glusterfs --extra-disks gluster-base
     assert_failure 10
-    run bash "$SCRIPT" --dry-run --glusterfs glusterbase 192.168.7.5
+    run bash "$SCRIPT" --dry-run --glusterfs gluster-base 192.168.7.5
+    assert_failure 10
+    run bash "$SCRIPT" --dry-run --imagen debian12 --base debian12.qcow2 server1
+    assert_failure 10
+    run bash "$SCRIPT" --dry-run --discos-nodo 7 server1
     assert_failure 10
     run bash "$SCRIPT" --dry-run --gluster-cluster --glusterfs
     assert_failure 10
@@ -601,13 +663,13 @@ qinfo() {
     dominio_existe "${USUARIO}-otra"
     [ -e "$SILO/server1.qcow2" ]
 
-    run bash "$SCRIPT" --glusterfs glusterbase
+    run bash "$SCRIPT" --glusterfs gluster-base
     assert_success
-    (cd "$SILO" && qemu-img create -f qcow2 -b glusterbase.qcow2 -F qcow2 nodo1.qcow2 40G >/dev/null)
-    run bash "$SCRIPT" --limpiar --glusterfs glusterbase </dev/null
+    (cd "$SILO" && qemu-img create -f qcow2 -b gluster-base.qcow2 -F qcow2 nodo1.qcow2 64G >/dev/null)
+    run bash "$SCRIPT" --limpiar --glusterfs gluster-base </dev/null
     assert_failure 21
     assert_output --partial "imagen base de nodo1.qcow2"
-    [ -e "$SILO/glusterbase.qcow2" ]
+    [ -e "$SILO/gluster-base.qcow2" ]
 }
 
 @test "clave pública con dos claves, vacía o que no lo es: error 31" {
@@ -632,10 +694,41 @@ qinfo() {
     assert_success
 }
 
-@test "una máquina llamada como la imagen base: error 10 sin hablar de --base" {
+@test "sin --tam, el disco toma el tamaño de la imagen de partida si es mayor que 40G" {
+    qemu-img create -f qcow2 "$SILO/grande.qcow2" 50G >/dev/null
+    run bash "$SCRIPT" --no-wait --base grande.qcow2 server1
+    assert_success
+    [ "$(qinfo "$SILO/server1.qcow2" '."virtual-size"')" = "53687091200" ]
+    assert_output --partial "(50G, copia COW de grande.qcow2)"
+}
+
+@test "--base: la variante de SO y el estilo de administrador se deducen de la imagen" {
+    # Copia de la imagen de Debian (aunque sea de segunda generación)
+    (cd "$SILO" && qemu-img create -f qcow2 -b debian12.qcow2 -F qcow2 deb-base.qcow2 >/dev/null \
+                && qemu-img create -f qcow2 -b deb-base.qcow2 -F qcow2 deb-nieta.qcow2 >/dev/null)
+    run bash "$SCRIPT" --dry-run --base deb-nieta.qcow2 server1
+    assert_success
+    assert_output --partial "Debian 12 (imagen cloud); variante debian12"
+    grep -q "NOPASSWD" "$SILO/cloudinit-${USUARIO}-server1.dry-run/cip-user.yaml"
+    # Imagen sin respaldo: la base del boletín (copia de ubuntu-base)
+    cp "$UBUNTU_BASE_COMPARTIDA" "$SILO/gluster-base.qcow2"
+    run bash "$SCRIPT" --dry-run --gluster-cluster --base gluster-base.qcow2
+    assert_success
+    assert_output --partial "ubuntu-base.qcow2 del boletín 1); variante ubuntu24.04"
+    ! grep -q "NOPASSWD" "$SILO/cloudinit-${USUARIO}-server1.dry-run/cip-user.yaml"
+    grep -q "lock_passwd: false" "$SILO/cloudinit-${USUARIO}-server1.dry-run/cip-user.yaml"
+}
+
+@test "una máquina llamada como una imagen cloud: error 10 sin hablar de --base, ni con --limpiar" {
     run bash "$SCRIPT" --dry-run debian12
     assert_failure 10
     refute_output --partial "--base"
+    run bash "$SCRIPT" --limpiar debian12 </dev/null
+    assert_failure 10
+    [ -e "$SILO/debian12.qcow2" ]
+    run bash "$SCRIPT" --limpiar --disco noble-server-cloudimg-amd64.img server1 </dev/null
+    assert_failure 10
+    [ -e "$SILO/noble-server-cloudimg-amd64.img" ]
 }
 
 @test "--version muestra la versión" {
@@ -647,15 +740,16 @@ qinfo() {
 @test "--listar: máquinas con estado, IP y discos, y discos del silo sin máquina" {
     run bash "$SCRIPT" --extra-disks server1
     assert_success
-    run bash "$SCRIPT" --glusterfs glusterbase
+    run bash "$SCRIPT" --imagen debian12 --glusterfs gluster-base
     assert_success
     run bash "$SCRIPT" --listar
     assert_success
     assert_output --partial "Máquinas ${USUARIO}-* (1):"
-    assert_output --regexp "${USUARIO}-server1 +en ejecución +192\.168\.7\.[0-9]+ +server1\.qcow2 \(copia de debian12\.qcow2\) \+ 6 discos extra"
+    assert_output --regexp "${USUARIO}-server1 +en ejecución +192\.168\.7\.[0-9]+ +server1\.qcow2 \(copia de noble-server-cloudimg-amd64\.img\) \+ 6 discos extra"
     assert_output --partial "Discos del silo sin máquina:"
-    assert_output --regexp "glusterbase\.qcow2 +copia de debian12\.qcow2"
-    assert_output --regexp "debian12\.qcow2 +imagen cloud"
+    assert_output --regexp "gluster-base\.qcow2 +copia de debian12\.qcow2"
+    assert_output --regexp "debian12\.qcow2 +imagen cloud de Debian 12"
+    assert_output --regexp "noble-server-cloudimg-amd64\.img +imagen cloud de Ubuntu 24\.04"
     run bash "$SCRIPT" --listar server1
     assert_failure 10
     run bash "$SCRIPT" --listar --extra-disks
@@ -678,6 +772,10 @@ qinfo() {
     [ ! -d "$SILO/cloudinit-${USUARIO}-server1" ]
     dominio_existe "${USUARIO}-server2"
     [ -e "$SILO/server2.qcow2" ] && [ -e "$SILO/debian12.qcow2" ]
+    run bash "$SCRIPT" --eliminar debian12 </dev/null
+    assert_failure 22
+    assert_output --partial "debian12.qcow2: es una imagen cloud de partida (nunca se borra)"
+    [ -e "$SILO/debian12.qcow2" ]
     run bash "$SCRIPT" --eliminar server9 </dev/null
     assert_failure 22
     run bash "$SCRIPT" --eliminar "${USUARIO}-server2"
@@ -695,26 +793,26 @@ qinfo() {
     dominio_existe "${USUARIO}-otra"
     [ -e "$SILO/server1.qcow2" ]
 
-    run bash "$SCRIPT" --glusterfs glusterbase
+    run bash "$SCRIPT" --glusterfs gluster-base
     assert_success
-    run bash "$SCRIPT" --base glusterbase.qcow2 nodo1
+    run bash "$SCRIPT" --base gluster-base.qcow2 nodo1
     assert_success
     # Solo quedan sus ficheros cloud-init por eliminar: el disco se conserva y se explica
-    run bash "$SCRIPT" --eliminar glusterbase </dev/null
+    run bash "$SCRIPT" --eliminar gluster-base </dev/null
     assert_success
-    assert_output --partial "glusterbase.qcow2: es la imagen base de nodo1.qcow2"
-    [ -e "$SILO/glusterbase.qcow2" ]
-    [ ! -d "$SILO/cloudinit-${USUARIO}-glusterbase" ]
-    run bash "$SCRIPT" --eliminar nodo1 glusterbase </dev/null
+    assert_output --partial "gluster-base.qcow2: es la imagen base de nodo1.qcow2"
+    [ -e "$SILO/gluster-base.qcow2" ]
+    [ ! -d "$SILO/cloudinit-${USUARIO}-gluster-base" ]
+    run bash "$SCRIPT" --eliminar nodo1 gluster-base </dev/null
     assert_success
     ! dominio_existe "${USUARIO}-nodo1"
-    [ ! -e "$SILO/nodo1.qcow2" ] && [ ! -e "$SILO/glusterbase.qcow2" ]
+    [ ! -e "$SILO/nodo1.qcow2" ] && [ ! -e "$SILO/gluster-base.qcow2" ]
 }
 
-@test "--eliminar-todo: todas las máquinas del usuario y los discos sin máquina; nunca debian12.qcow2 ni otro prefijo" {
+@test "--eliminar-todo: todas las máquinas del usuario y los discos sin máquina; nunca las imágenes cloud ni otro prefijo" {
     run bash "$SCRIPT" server1
     assert_success
-    run bash "$SCRIPT" --glusterfs glusterbase
+    run bash "$SCRIPT" --glusterfs gluster-base
     assert_success
     run bash "$SCRIPT" --prefijo demo server1
     assert_success
@@ -724,8 +822,9 @@ qinfo() {
     run bash "$SCRIPT" --eliminar-todo </dev/null
     assert_success
     ! dominio_existe "${USUARIO}-server1"
-    [ ! -e "$SILO/server1.qcow2" ] && [ ! -e "$SILO/glusterbase.qcow2" ]
-    [ -e "$SILO/debian12.qcow2" ]
+    [ ! -e "$SILO/server1.qcow2" ] && [ ! -e "$SILO/gluster-base.qcow2" ]
+    [ -e "$SILO/debian12.qcow2" ] && [ -e "$SILO/noble-server-cloudimg-amd64.img" ]
+    [ -e "$UBUNTU_BASE_COMPARTIDA" ]
     dominio_existe "demo-server1"
     [ -e "$SILO/demo-server1.qcow2" ]
     assert_output --partial "demo-server1.qcow2: lo usa la máquina 'demo-server1'"
@@ -739,14 +838,34 @@ qinfo() {
 
 @test "--menu: el asistente construye el comando, lo ejecuta y vuelve al menú" {
     export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
-    printf '%s\n' "0 basica" "0 server1" "0 " "0 \"extra-disks\" \"no-root\"" "0" "0 salir" > "$MOCK_WHIPTAIL"
+    printf '%s\n' "0 basica" "0 server1" "0 " "0 debian12" "0 \"extra-disks\" \"no-root\"" "0" "0 salir" > "$MOCK_WHIPTAIL"
     run bash "$SCRIPT" --menu </dev/null
     assert_success
-    assert_output --partial "→ $SCRIPT --extra-disks --no-root server1"
+    # La máquina básica es la del boletín 1: Debian 12 aparece marcada
+    grep -q -- '--radiolist .* noble Ubuntu 24.04 (boletín 2) off debian12 Debian 12 (boletín 1) on$' "$MOCK_STATE/log"
+    assert_output --partial "→ $SCRIPT --imagen debian12 --extra-disks --no-root server1"
     assert_output --partial "Sin cambios."
     dominio_existe "${USUARIO}-server1"
     [ -e "$SILO/server1-vdg.qcow2" ]
-    [ "$(llamadas '^whiptail --title')" -eq 6 ]
+    [ "$(qinfo "$SILO/server1.qcow2" '."backing-filename"')" = "debian12.qcow2" ]
+    [ "$(llamadas '^whiptail --title')" -eq 7 ]
+}
+
+@test "--menu: el clúster deja elegir la imagen de la base y los discos de crea-entorno.sh" {
+    export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
+    printf '%s\n' "0 cluster" "0 debian12" "0 \"discos-crea-entorno\"" "0" "1" > "$MOCK_WHIPTAIL"
+    run bash "$SCRIPT" --menu </dev/null
+    assert_success
+    grep -q -- ' 13 78 3 noble Imagen cloud de Ubuntu 24.04, la misma que SERVER1 (recomendada) on ubuntu-base ' "$MOCK_STATE/log"
+    assert_output --partial "→ $SCRIPT --gluster-cluster --imagen debian12 --discos-nodo 7"
+    [ "$(qinfo "$SILO/gluster-base.qcow2" '."backing-filename"')" = "debian12.qcow2" ]
+    [ -e "$SILO/server4-vdh.qcow2" ]
+
+    # Con la base ya hecha, ofrece reutilizarla y no pregunta la imagen
+    printf '%s\n' "0 cluster" "0" "0 \"limpiar\"" "0" "1" > "$MOCK_WHIPTAIL"
+    run bash "$SCRIPT" --menu </dev/null
+    assert_success
+    assert_output --partial "→ $SCRIPT --gluster-cluster --base gluster-base.qcow2 --limpiar"
 }
 
 @test "--menu: cancelar en el menú principal no hace nada" {
@@ -760,10 +879,11 @@ qinfo() {
 
 @test "--menu: almacenamiento extra pide el nombre, sugiere la IP .2 y marca los discos; eliminar elige de la lista" {
     export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
-    printf '%s\n' "0 extra" "0 server1" "0 192.168.7.2" "0 \"extra-disks\"" "0" "0 eliminar" "0 \"server1\"" "0" "1" > "$MOCK_WHIPTAIL"
+    printf '%s\n' "0 extra" "0 server1" "0 192.168.7.2" "0 noble" "0 \"extra-disks\"" "0" "0 eliminar" "0 \"server1\"" "0" "1" > "$MOCK_WHIPTAIL"
     run bash "$SCRIPT" --menu </dev/null
     assert_success
     grep -q -- ' 16 70 192.168.7.2$' "$MOCK_STATE/log"
+    grep -q -- '--radiolist .* noble Ubuntu 24.04 (boletín 2) on debian12 Debian 12 (boletín 1) off$' "$MOCK_STATE/log"
     grep -q -- 'extra-disks Seis discos extra vdb..vdg de 40G on ' "$MOCK_STATE/log"
     assert_output --partial "→ $SCRIPT --extra-disks server1 192.168.7.2"
     assert_output --partial "→ $SCRIPT --eliminar server1"
@@ -775,7 +895,7 @@ qinfo() {
 @test "--menu: la lista gráfica muestra máquinas y discos sueltos, con ficha al elegir" {
     run bash "$SCRIPT" --extra-disks server1
     assert_success
-    run bash "$SCRIPT" --glusterfs glusterbase
+    run bash "$SCRIPT" --imagen debian12 --glusterfs glusterbase
     assert_success
     export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
     printf '%s\n' "0 listar" "0 m:${USUARIO}-server1" "0" "0 d:$SILO/glusterbase.qcow2" "0" "1" "1" > "$MOCK_WHIPTAIL"
@@ -793,12 +913,12 @@ qinfo() {
 
 @test "--menu: la contraseña no se muestra en el comando; sin whiptail, error 38; sin más opciones" {
     export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
-    printf '%s\n' "0 basica" "0 web" "0 " "0 \"ssh-pass\"" "0 Secreta1" "0" "1" > "$MOCK_WHIPTAIL"
+    printf '%s\n' "0 basica" "0 web" "0 " "0 noble" "0 \"ssh-pass\"" "0 Secreta1" "0" "1" > "$MOCK_WHIPTAIL"
     run bash "$SCRIPT" --menu </dev/null
     assert_success
     assert_output --partial "→ $SCRIPT --ssh-pass •••••• web"
     refute_output --partial "--ssh-pass Secreta1"
-    grep -q "administrador:Secreta1" "$SILO/cloudinit-${USUARIO}-web/cip-user.yaml"
+    grep -q "password: 'Secreta1'" "$SILO/cloudinit-${USUARIO}-web/cip-user.yaml"
 
     local bin="$BATS_TEST_TMPDIR/bin"
     mkdir -p "$bin"
@@ -831,7 +951,7 @@ qinfo() {
 @test "--ssh-pass -: la contraseña se pide por teclado; sin terminal, error 11" {
     run con_terminal 'Contraseña' Secreta9 bash "$SCRIPT" --ssh-pass - server1
     assert_success
-    grep -q "administrador:Secreta9" "$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
+    grep -q "password: 'Secreta9'" "$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
     run bash "$SCRIPT" --ssh-pass - server2 </dev/null
     assert_failure 11
 }
@@ -871,7 +991,7 @@ qinfo() {
 }
 
 @test "un conflicto se detecta antes de descargar la imagen base" {
-    rm "$SILO/debian12.qcow2"
+    rm "$SILO/noble-server-cloudimg-amd64.img"
     touch "$SILO/server1.qcow2"
     run bash "$SCRIPT" server1
     assert_failure 21
@@ -881,7 +1001,8 @@ qinfo() {
 @test "si falla un nodo del clúster, se deshacen los nodos pero la base recién construida se conserva" {
     MOCK_VIRT_INSTALL_FALLA_EN=4 run bash "$SCRIPT" --gluster-cluster
     assert_failure
-    [ -e "$SILO/glusterbase.qcow2" ]
+    [ -e "$SILO/gluster-base.qcow2" ]
+    assert_output --partial "--base gluster-base.qcow2"
     assert_output --partial "se conserva"
     ! dominio_existe "${USUARIO}-server1"
     [ ! -e "$SILO/server1.qcow2" ] && [ ! -e "$SILO/server3.qcow2" ]
@@ -907,12 +1028,12 @@ qinfo() {
     if PATH="$bin:/usr/bin:/bin" command -v wget >/dev/null 2>&1; then
         skip "hay un wget en /usr/bin: no se puede aislar la rama de curl"
     fi
-    rm "$SILO/debian12.qcow2"
+    rm "$SILO/noble-server-cloudimg-amd64.img"
     # "$BASH": el bash con el que corre bats, no el /bin/bash del sistema (en macOS es 3.2)
     PATH="$bin:/usr/bin:/bin" run "$BASH" "$SCRIPT" server1
     assert_success
     [ "$(llamadas '^curl')" -eq 1 ]
-    [ "$(qinfo "$SILO/debian12.qcow2" '.format')" = "qcow2" ]
+    [ "$(qinfo "$SILO/noble-server-cloudimg-amd64.img" '.format')" = "qcow2" ]
 }
 
 @test "el agente puede tardar en devolver el resultado de cloud-init status" {
@@ -980,13 +1101,23 @@ qinfo() {
 @test "--tam se aplica a la base y a los nodos del clúster; las opciones de acceso llegan al resumen" {
     run bash "$SCRIPT" --gluster-cluster --tam 20G --no-root --ssh-pass Clave1 --no-virt-viewer
     assert_success
-    [ "$(qinfo "$SILO/glusterbase.qcow2" '."virtual-size"')" -eq $(( 20 * 1024 * 1024 * 1024 )) ]
+    [ "$(qinfo "$SILO/gluster-base.qcow2" '."virtual-size"')" -eq $(( 20 * 1024 * 1024 * 1024 )) ]
     [ "$(qinfo "$SILO/server4.qcow2" '."virtual-size"')" -eq $(( 20 * 1024 * 1024 * 1024 )) ]
     assert_output --partial "(o con la contraseña: Clave1)"
     assert_output --partial "administrador, contraseña: Clave1"
     refute_output --partial "virt-viewer --connect"
-    grep -q "administrador:Clave1" "$SILO/cloudinit-${USUARIO}-server3/cip-user.yaml"
-    ! grep -q "root:" "$SILO/cloudinit-${USUARIO}-server3/cip-user.yaml"
+    grep -q "password: 'Clave1'" "$SILO/cloudinit-${USUARIO}-server3/cip-user.yaml"
+    ! grep -q "name: root" "$SILO/cloudinit-${USUARIO}-server3/cip-user.yaml"
+}
+
+@test "clúster desde ubuntu-base: --tam menor que 64G no vale; uno mayor amplía la copia y los nodos" {
+    run bash "$SCRIPT" --dry-run --gluster-cluster --imagen ubuntu-base --tam 40G
+    assert_failure 15
+    run bash "$SCRIPT" --gluster-cluster --imagen ubuntu-base --tam 80G
+    assert_success
+    [ "$(qinfo "$SILO/gluster-base.qcow2" '."virtual-size"')" -eq $(( 80 * 1024 * 1024 * 1024 )) ]
+    [ "$(qinfo "$SILO/server2.qcow2" '."virtual-size"')" -eq $(( 80 * 1024 * 1024 * 1024 )) ]
+    [ "$(qinfo "$UBUNTU_BASE_COMPARTIDA" '."virtual-size"')" -eq $(( 64 * 1024 * 1024 * 1024 )) ]
 }
 
 @test "nombre de máquina de más de 63 caracteres: error 20" {
@@ -995,16 +1126,16 @@ qinfo() {
 }
 
 @test "--glusterfs a partir de otra base (--base) y clúster con --prefijo y --base" {
-    run bash "$SCRIPT" --glusterfs glusterbase
+    run bash "$SCRIPT" --glusterfs gluster-base
     assert_success
-    run bash "$SCRIPT" --glusterfs --base glusterbase.qcow2 gluster2
+    run bash "$SCRIPT" --glusterfs --base gluster-base.qcow2 gluster2
     assert_success
-    [ "$(qinfo "$SILO/gluster2.qcow2" '."backing-filename"')" = "glusterbase.qcow2" ]
+    [ "$(qinfo "$SILO/gluster2.qcow2" '."backing-filename"')" = "gluster-base.qcow2" ]
     run bash "$SCRIPT" --prefijo demo --gluster-cluster --base gluster2.qcow2
     assert_success
     assert_output --partial "Fase 1 de 2: se omite"
     [ "$(qinfo "$SILO/demo-server1.qcow2" '."backing-filename"')" = "gluster2.qcow2" ]
-    [ ! -e "$SILO/demo-glusterbase.qcow2" ]
+    [ ! -e "$SILO/demo-gluster-base.qcow2" ]
     dominio_existe "demo-server4"
 }
 
@@ -1138,9 +1269,11 @@ qinfo() {
     assert_output --partial "${USUARIO}-server4  →  192.168.7.13"
     assert_output --partial "1024 MB y 1 vCPU"
     [ "$(llamadas '^virt-install')" -eq 0 ]
-    [ ! -e "$SILO/glusterbase.qcow2" ]
+    assert_output --partial "copia COW de noble-server-cloudimg-amd64.img, 40G"
+    assert_output --partial "vdb, vdc y vdd en xfs, montados en /gluster1 /gluster2 /gluster3."
+    [ ! -e "$SILO/gluster-base.qcow2" ]
     [ ! -e "$SILO/server1.qcow2" ]
-    [ -d "$SILO/cloudinit-${USUARIO}-glusterbase.dry-run" ]
+    [ -d "$SILO/cloudinit-${USUARIO}-gluster-base.dry-run" ]
     [ -d "$SILO/cloudinit-${USUARIO}-server4.dry-run" ]
 }
 
@@ -1148,26 +1281,30 @@ qinfo() {
     run bash "$SCRIPT" --gluster-cluster
     assert_success
 
-    # Fase 1: la base se crea, se espera, se apaga y se elimina su dominio; el disco queda
-    [ "$(llamadas "shutdown ${USUARIO}-glusterbase")" -eq 1 ]
-    [ "$(llamadas "undefine ${USUARIO}-glusterbase")" -eq 1 ]
-    ! dominio_existe "${USUARIO}-glusterbase"
-    [ "$(qinfo "$SILO/glusterbase.qcow2" '."backing-filename"')" = "debian12.qcow2" ]
-    grep -q "glusterfs-server" "$SILO/cloudinit-${USUARIO}-glusterbase/cip-user.yaml"
+    # Fase 1: la base (copia COW de la imagen de Ubuntu, como SERVER1) se crea,
+    # se espera, se apaga y se elimina su dominio; el disco queda
+    [ "$(llamadas "shutdown ${USUARIO}-gluster-base")" -eq 1 ]
+    [ "$(llamadas "undefine ${USUARIO}-gluster-base")" -eq 1 ]
+    ! dominio_existe "${USUARIO}-gluster-base"
+    [ "$(qinfo "$SILO/gluster-base.qcow2" '."backing-filename"')" = "noble-server-cloudimg-amd64.img" ]
+    grep -q "glusterfs-server" "$SILO/cloudinit-${USUARIO}-gluster-base/cip-user.yaml"
 
-    # Fase 2: cuatro nodos, COW de la base, con sus siete discos extra
+    # Fase 2: cuatro nodos, COW de la base, con sus tres discos extra (los del boletín)
     [ "$(llamadas '^virt-install')" -eq 5 ]
+    [ "$(llamadas '--os-variant ubuntu24.04')" -eq 5 ]
     local h u i
     for h in server1 server2 server3 server4; do
         dominio_existe "${USUARIO}-$h"
-        [ "$(qinfo "$SILO/$h.qcow2" '."backing-filename"')" = "glusterbase.qcow2" ]
-        for u in vdb vdc vdd vde vdf vdg vdh; do
+        [ "$(qinfo "$SILO/$h.qcow2" '."backing-filename"')" = "gluster-base.qcow2" ]
+        [ "$(qinfo "$SILO/$h.qcow2" '."virtual-size"')" = "42949672960" ]
+        for u in vdb vdc vdd; do
             [ -e "$SILO/$h-$u.qcow2" ]
         done
+        [ ! -e "$SILO/$h-vde.qcow2" ]
     done
     local linea
     linea="$(grep "^virt-install.*--name ${USUARIO}-server2 " "$MOCK_STATE/log")"
-    [ "$(grep -o -- '--disk path=' <<< "$linea" | wc -l | tr -d ' ')" -eq 8 ]
+    [ "$(grep -o -- '--disk path=' <<< "$linea" | wc -l | tr -d ' ')" -eq 4 ]
     [[ "$linea" == *"--ram 1024 --vcpus 1"* ]]
 
     # cloud-init de un nodo: sin apt, con /etc/hosts, xfs y montajes
@@ -1187,6 +1324,10 @@ qinfo() {
     grep -q "mkdir -p /gluster1 /gluster2 /gluster3" "$un"
     grep -q -- "- mount -a" "$un"
     ! grep -q "^mounts:" "$un"
+    # administrador como en SERVER1: tu clave y sudo sin contraseña
+    grep -q "NOPASSWD" "$un"
+    grep -q "^ssh_pwauth: false" "$un"
+    ! grep -q "lock_passwd" "$un"
     grep -q "instance-id: ${USUARIO}-server2" "$SILO/cloudinit-${USUARIO}-server2/cip-meta.yaml"
     grep -q -- "- 192.168.7.11/24" "$SILO/cloudinit-${USUARIO}-server2/cip-net.yaml"
 
@@ -1196,14 +1337,51 @@ qinfo() {
         [ ! -e "$MOCK_STATE/dominios/${USUARIO}-server$i/iso" ]
     done
     assert_output --regexp "${USUARIO}-server3 +192\.168\.7\.12 +hostname server3"
-    assert_output --partial "no borres $SILO/glusterbase.qcow2"
+    assert_output --partial "Discos       : vdb..vdd (3 × 40G) en cada nodo"
+    refute_output --partial "sudo la pide"
+    assert_output --partial "no borres $SILO/gluster-base.qcow2"
+    assert_output --partial "(nodos e imagen base)"
+    assert_output --partial "--eliminar server1 server2 server3 server4 gluster-base"
+}
+
+@test "clúster con --discos-nodo 7: los siete discos de crea-entorno.sh, solo tres formateados" {
+    run bash "$SCRIPT" --gluster-cluster --discos-nodo 7
+    assert_success
+    local u
+    for u in vdb vdc vdd vde vdf vdg vdh; do
+        [ -e "$SILO/server3-$u.qcow2" ]
+    done
+    local linea
+    linea="$(grep "^virt-install.*--name ${USUARIO}-server3 " "$MOCK_STATE/log")"
+    [ "$(grep -o -- '--disk path=' <<< "$linea" | wc -l | tr -d ' ')" -eq 8 ]
+    ! grep -q "device: /dev/vde" "$SILO/cloudinit-${USUARIO}-server3/cip-user.yaml"
+    assert_output --partial "vdb, vdc y vdd en xfs, montados en /gluster1 /gluster2 /gluster3; vde..vdh sin formatear"
+    run bash "$SCRIPT" --dry-run --prefijo otro --gluster-cluster --discos-nodo 4
+    assert_success
+    assert_output --partial "; vde sin formatear."
+    run bash "$SCRIPT" --dry-run --gluster-cluster --discos-nodo 2
+    assert_failure 13
+    run bash "$SCRIPT" --dry-run --gluster-cluster --discos-nodo 8
+    assert_failure 13
+    run bash "$SCRIPT" --dry-run --gluster-cluster --discos-nodo tres
+    assert_failure 13
+}
+
+@test "clúster con --imagen debian12: la base es copia COW de Debian y administrador como en SERVER1" {
+    run bash "$SCRIPT" --gluster-cluster --imagen debian12
+    assert_success
+    [ "$(qinfo "$SILO/gluster-base.qcow2" '."backing-filename"')" = "debian12.qcow2" ]
+    [ "$(llamadas '--os-variant debian12')" -eq 5 ]
+    grep -q "NOPASSWD" "$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
+    grep -q "^ssh_pwauth: false" "$SILO/cloudinit-${USUARIO}-server1/cip-user.yaml"
+    refute_output --partial "sudo la pide"
 }
 
 @test "clúster: conflicto con un disco de un nodo, y --limpiar lo resuelve" {
-    touch "$SILO/server3-vdh.qcow2"
+    touch "$SILO/server3-vdd.qcow2"
     run bash "$SCRIPT" --gluster-cluster
     assert_failure 21
-    assert_output --partial "server3-vdh.qcow2"
+    assert_output --partial "server3-vdd.qcow2"
     [ "$(llamadas '^virt-install')" -eq 0 ]
 
     run bash "$SCRIPT" --limpiar --gluster-cluster </dev/null
@@ -1217,10 +1395,11 @@ qinfo() {
     run bash "$SCRIPT" --limpiar --gluster-cluster --base mibase.qcow2 </dev/null
     assert_success
     assert_output --partial "Fase 1 de 2: se omite"
-    refute_output --partial "Creando la máquina '${USUARIO}-glusterbase'"
+    refute_output --partial "Creando la máquina '${USUARIO}-gluster-base'"
     [ "$(llamadas '^virt-install')" -eq 4 ]
+    [ "$(llamadas '--os-variant debian12')" -eq 4 ]
     [ -e "$SILO/mibase.qcow2" ]
-    [ ! -e "$SILO/glusterbase.qcow2" ]
+    [ ! -e "$SILO/gluster-base.qcow2" ]
     local h
     for h in server1 server2 server3 server4; do
         [ "$(qinfo "$SILO/$h.qcow2" '."backing-filename"')" = "mibase.qcow2" ]
@@ -1257,16 +1436,16 @@ qinfo() {
     MOCK_SHUTDOWN_NUNCA=1 run bash "$SCRIPT" --gluster-cluster
     assert_failure 70
     assert_output --partial "Deshaciendo"
-    ! dominio_existe "${USUARIO}-glusterbase"
-    [ ! -e "$SILO/glusterbase.qcow2" ]
+    ! dominio_existe "${USUARIO}-gluster-base"
+    [ ! -e "$SILO/gluster-base.qcow2" ]
     [ ! -e "$SILO/server1.qcow2" ]
 }
 
 @test "clúster: si cloud-init falla en la base, error 71, la base se conserva y no hay nodos" {
     MOCK_CI_RESULT=error run bash "$SCRIPT" --gluster-cluster
     assert_failure 71
-    dominio_existe "${USUARIO}-glusterbase"
-    [ -e "$SILO/glusterbase.qcow2" ]
+    dominio_existe "${USUARIO}-gluster-base"
+    [ -e "$SILO/gluster-base.qcow2" ]
     ! dominio_existe "${USUARIO}-server1"
     [ ! -e "$SILO/server1.qcow2" ]
 }
@@ -1274,7 +1453,7 @@ qinfo() {
 @test "clúster con --no-wait: espera a la base pero no a los nodos" {
     run bash "$SCRIPT" --no-wait --gluster-cluster
     assert_success
-    [ "$(llamadas "domifaddr ${USUARIO}-glusterbase")" -ge 1 ]
+    [ "$(llamadas "domifaddr ${USUARIO}-gluster-base")" -ge 1 ]
     [ "$(llamadas "domifaddr ${USUARIO}-server1")" -eq 0 ]
     [ "$(llamadas '^virt-install')" -eq 5 ]
 }
