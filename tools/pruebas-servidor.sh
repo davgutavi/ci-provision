@@ -16,6 +16,8 @@
 #                    (como la clave de pruebas se borra, solo se podrá entrar en
 #                    ellas por consola). Sin ella, no queda nada en marcha.
 #   SIN_MYSQL=1      En la fase C, omitir la prueba de MySQL en Podman (unos 3 min).
+#   PREFIJO=xxx      En la fase C, crear el clúster como xxx-server1..4 (con
+#                    --prefijo), para no chocar con tus máquinas server1..4.
 #
 # Para entrar en las máquinas de prueba la batería usa una clave de usar y
 # tirar: la genera al empezar (sin frase de paso, en un directorio propio de
@@ -103,8 +105,40 @@ en_vm_es() {
     fi
 }
 
+# Errores y avisos de la ejecución de cloud-init que configuró la máquina.
+# Tras el reinicio en frío del script, 'cloud-init status' dice "disabled" (ya no
+# está su CD-ROM), pero el resultado de aquella ejecución queda en result.json.
+CI_SIN_ERRORES='sudo python3 -c "import json; r = json.load(open(\"/var/lib/cloud/data/result.json\"))[\"v1\"]; print(len(r.get(\"errors\") or []) + len(r.get(\"recoverable_errors\") or {}))"'
+
 # Comprueba que la contraseña de root es s1st3mas (sin mostrar nada de shadow)
 ROOT_ES_S1ST3MAS="perl -e '\$h=(getpwnam(q(root)))[1]; print crypt(q(s1st3mas),\$h) eq \$h ? qq(si) : qq(no)'"
+
+# on_reboot de la definición con la que se ejecuta la máquina: tiene que ser
+# 'restart' (si fuera 'destroy', el primer reboot desde dentro la apagaría)
+reinicia_bien() {   # DOMINIO
+    # Sin tubería hacia 'grep -q': con pipefail, su SIGPIPE haría fallar la prueba
+    local xml
+    xml="$(virsh dumpxml "$1" 2>/dev/null)"
+    grep -q '<on_reboot>restart</on_reboot>' <<< "$xml"
+}
+
+# 'sudo systemctl reboot' dentro de la máquina; éxito si vuelve a estar en
+# marcha y a responder en su IP (y no se queda apagada)
+reinicia_desde_dentro() {   # IP DOMINIO
+    local ip="$1" d="$2" i
+    en_vm "$ip" "sudo systemctl reboot" >/dev/null 2>&1
+    sleep 10
+    for i in $(seq 60); do
+        if [[ "$(virsh domstate "$d" 2>/dev/null)" == "shut off" ]]; then
+            return 1
+        fi
+        if virsh domifaddr "$d" --source agent 2>/dev/null | grep -q " $ip/"; then
+            return 0
+        fi
+        sleep 3
+    done
+    return 1
+}
 
 # Extrae "IP           : X" del resumen del script
 ip_del_resumen() {
@@ -221,6 +255,8 @@ fase_a() {
     ejecutar_script --dry-run pruebas1 "$IP_DHCP" 2>&1 | sed 's/^/    | /'
     echo
     ejecutar_script --dry-run --limpiar --gluster-cluster 2>&1 | sed -n '1,/^$/p' | sed 's/^/    | /'
+    # Los --dry-run dejan sus ficheros en cloudinit-*.dry-run: fuera
+    rm -rf "$SILO"/cloudinit-"${USUARIO}"-*.dry-run "$SILO"/cloudinit-demo-*.dry-run "$SILO"/cloudinit-otro-*.dry-run
 }
 
 ########################################
@@ -248,6 +284,8 @@ fase_b() {
         && ko "el agente NO ha permitido consultar cloud-init (revisar qemu-agent-command)" \
         || ok "el estado de cloud-init se ha consultado a través del agente"
     grep -q "Medio de cloud-init expulsado" <<< "$salida" && ok "medio de cloud-init expulsado" || ko "no se expulsó el medio"
+    grep -q "pruebas1 reiniciada" <<< "$salida" && ok "reiniciada en frío al terminar" || ko "no se reinició en frío"
+    comprueba "on_reboot=restart en la definición en ejecución" reinicia_bien "${USUARIO}-pruebas1"
 
     comprueba "el dominio está en ejecución" bash -c "[ \"\$(virsh domstate ${USUARIO}-pruebas1)\" = running ]"
     comprueba "gráficos SPICE en la definición" bash -c "virsh dumpxml ${USUARIO}-pruebas1 | grep -q \"graphics type='spice'\""
@@ -260,8 +298,8 @@ fase_b() {
 
     if [[ -n "$ip" ]]; then
         en_vm_es "$ip" "hostname"                        "pruebas1"      hostname
-        en_vm_es "$ip" "cloud-init terminado"            "status: done"  cloud-init status
-        en_vm_es "$ip" "cloud-init sin avisos (no 'degraded')" "extended_status: done" "cloud-init status --long | grep '^extended_status'"
+        en_vm_es "$ip" "cloud-init terminó (boot-finished)" "si"         "test -f /var/lib/cloud/instance/boot-finished && echo si"
+        en_vm_es "$ip" "cloud-init sin errores ni avisos" "0"            "$CI_SIN_ERRORES"
         en_vm_es "$ip" "Ubuntu 24.04"                    "24.04"         ". /etc/os-release; echo \$VERSION_ID"
         en_vm_es "$ip" "interfaz enp1s0"                 "enp1s0"        "ip -br link | awk '\$1 != \"lo\" {print \$1}'"
         en_vm_es "$ip" "qemu-guest-agent activo"         "active"        systemctl is-active qemu-guest-agent
@@ -299,17 +337,22 @@ fase_b() {
         en_vm_es "$IP_LIBRE" "apt update (DNS y salida a Internet)" "0" "sudo apt-get update >/dev/null 2>&1; echo \$?"
         en_vm_es "$IP_LIBRE" "netplan renderizado con routes"   "1" "sudo grep -c 'to: \"\\?default' /etc/netplan/50-cloud-init.yaml"
         en_vm_es "$IP_LIBRE" "apt instala lvm2 (boletín 2, 2.2 a)" "0" "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq lvm2 >/dev/null 2>&1; echo \$?"
+        comprueba "on_reboot=restart en la definición en ejecución" reinicia_bien "${USUARIO}-pruebas1"
+        comprueba "'sudo systemctl reboot' desde dentro: vuelve a arrancar (no se apaga)" reinicia_desde_dentro "$IP_LIBRE" "${USUARIO}-pruebas1"
 
         # Instantáneas internas como en los epígrafes 2.1 e) y o)-s) del boletín:
         # en caliente con los seis discos, en frío, detach-disk de vdb y reversión
         local d="${USUARIO}-pruebas1"
         comprueba "sin CD-ROM con medio (nada que impida instantáneas internas)" bash -c "! virsh domblklist $d | awk 'NR>2 && NF && \$2 != \"-\"' | grep -qv '\.qcow2\$'"
         comprueba "instantánea 'inicio' en caliente con 7 discos (--atomic)" virsh snapshot-create-as "$d" --name inicio --atomic
+        comprueba "la instantánea 'inicio' guarda on_reboot=restart" bash -c "virsh snapshot-dumpxml $d inicio | grep -q '<on_reboot>restart</on_reboot>'"
         comprueba "apagado limpio" bash -c "virsh shutdown $d >/dev/null; for i in \$(seq 60); do [ \"\$(virsh domstate $d)\" = 'shut off' ] && exit 0; sleep 2; done; exit 1"
         comprueba "instantánea 'antesdeliarla' en frío (--atomic)" virsh snapshot-create-as "$d" --name antesdeliarla --atomic
         comprueba "detach-disk de \$PWD/pruebas1-vdb.qcow2, como en el boletín" bash -c "cd '$SILO' && virsh detach-disk $d \$PWD/pruebas1-vdb.qcow2 --persistent"
         comprueba "revertir 'antesdeliarla' recupera vdb (7 discos)" bash -c "virsh snapshot-revert $d antesdeliarla && [ \"\$(virsh domblklist $d | grep -c '^ vd')\" = 7 ]"
         comprueba "revertir 'inicio' deja la máquina en marcha" bash -c "virsh snapshot-revert $d inicio && [ \"\$(virsh domstate $d)\" = running ]"
+        comprueba "tras revertir 'inicio', on_reboot sigue siendo restart" reinicia_bien "$d"
+        comprueba "tras revertir 'inicio', un reboot desde dentro no la apaga" reinicia_desde_dentro "$IP_LIBRE" "$d"
         virsh snapshot-delete "$d" antesdeliarla >/dev/null 2>&1
         virsh snapshot-delete "$d" inicio >/dev/null 2>&1
     fi
@@ -325,7 +368,7 @@ fase_b() {
     ip="$(ip_del_resumen "$salida")"
     if [[ -n "$ip" ]]; then
         en_vm_es "$ip" "Debian 12"                          "12"             ". /etc/os-release; echo \$VERSION_ID"
-        en_vm_es "$ip" "cloud-init terminado (sintaxis nueva de chpasswd en Debian)" "status: done" cloud-init status
+        en_vm_es "$ip" "cloud-init sin errores (sintaxis nueva de chpasswd en Debian)" "0" "$CI_SIN_ERRORES"
         en_vm_es "$ip" "sshd: SSH por contraseña activado" "passwordauthentication yes" "sudo sshd -T | grep -i '^passwordauthentication'"
         en_vm_es "$ip" "administrador con contraseña"      "con-contraseña" "sudo passwd -S administrador | awk '{print (\$2==\"P\")?\"con-contraseña\":\"sin-contraseña\"}'"
         en_vm_es "$ip" "root sin contraseña (--no-root)"   "sin-contraseña" "sudo passwd -S root | awk '{print (\$2==\"P\")?\"con-contraseña\":\"sin-contraseña\"}'"
@@ -398,19 +441,24 @@ fase_b() {
 # Fase C: clúster GlusterFS
 ########################################
 fase_c() {
-    titulo "Fase C: clúster GlusterFS"
+    # Con PREFIJO=xxx, el clúster de prueba es xxx-server1..4 y xxx-gluster-base,
+    # para no chocar con un clúster o un SERVER1 que tengas con los nombres normales
+    local PD="${PREFIJO:-$USUARIO}" PF="${PREFIJO:+$PREFIJO-}"
+    local -a PO=()
+    if [[ -n "${PREFIJO:-}" ]]; then PO=( --prefijo "$PREFIJO" ); fi
+    titulo "Fase C: clúster GlusterFS${PREFIJO:+ (prefijo $PREFIJO)}"
     descubrir_red
 
     local -a extra=()
     local salida rc inicio
-    salida="$(ejecutar_script --dry-run --gluster-cluster 2>&1)"; rc=$?
+    salida="$(ejecutar_script ${PO[@]+"${PO[@]}"} --dry-run --gluster-cluster 2>&1)"; rc=$?
     if [[ $rc == 21 ]]; then
         if [[ -z "${LIMPIAR:-}" ]]; then
             echo "  Ya existen elementos que el clúster tendría que crear:"
             echo "$salida" | sed -n '/Ya existen/,/^$/p' | sed 's/^/    | /'
             echo
             echo "  Si quieres que el script los elimine (solo esos), repite con:"
-            echo "    LIMPIAR=1 bash $0 c"
+            echo "    LIMPIAR=1 bash $0 c      (o, para no tocarlos: PREFIJO=prueba bash $0 c)"
             exit 1
         fi
         extra=( --limpiar )
@@ -424,30 +472,31 @@ fase_c() {
     # ---------- C1: el clúster por defecto (base Noble, 3 discos por nodo) ----------
     titulo "C1: --gluster-cluster (base desde la imagen de Ubuntu, 3 discos por nodo)"
     inicio=$SECONDS
-    salida="$(ejecutar_script ${extra[@]+"${extra[@]}"} --gluster-cluster 2>&1)"; rc=$?
+    salida="$(ejecutar_script ${PO[@]+"${PO[@]}"} ${extra[@]+"${extra[@]}"} --gluster-cluster 2>&1)"; rc=$?
     echo "$salida" >> "$LOG"
     info "tiempo total: $(( SECONDS - inicio ))s"
     [[ $rc == 0 ]] && ok "termina con código 0" || { ko "código $rc"; echo "$salida" | tail -20 | sed 's/^/    | /'; }
     echo "$salida" | grep -E "operativa tras|Base lista|Deshaciendo|AVISO|ERROR" | sed 's/^/    | /'
 
-    comprueba "la base ya no existe como dominio" bash -c "! virsh dominfo ${USUARIO}-gluster-base >/dev/null 2>&1"
-    comprueba "gluster-base.qcow2 se conserva, COW de $NOBLE" bash -c "[ \"\$(qemu-img info -U --output=json '$SILO/gluster-base.qcow2' | jq -r '.\"backing-filename\"')\" = $NOBLE ]"
+    comprueba "la base ya no existe como dominio" bash -c "! virsh dominfo ${PD}-gluster-base >/dev/null 2>&1"
+    comprueba "gluster-base.qcow2 se conserva, COW de $NOBLE" bash -c "[ \"\$(qemu-img info -U --output=json '$SILO/${PF}gluster-base.qcow2' | jq -r '.\"backing-filename\"')\" = $NOBLE ]"
 
     local i j h ip esperado mids=() hks=()
     for i in 0 1 2 3; do
         h="server$(( i + 1 ))"
         ip="${GW%.*}.$(( 10 + i ))"
         titulo "Nodo $h ($ip)"
-        comprueba "dominio en ejecución" bash -c "[ \"\$(virsh domstate ${USUARIO}-$h)\" = running ]"
-        comprueba "4 discos virtio conectados (vda + vdb..vdd)" bash -c "[ \"\$(virsh domblklist ${USUARIO}-$h | grep -c '^ vd')\" = 4 ]"
-        comprueba "COW de gluster-base.qcow2" bash -c "[ \"\$(qemu-img info -U --output=json '$SILO/$h.qcow2' | jq -r '.\"backing-filename\"')\" = gluster-base.qcow2 ]"
-        comprueba "variante de SO ubuntu24.04" bash -c "virsh dumpxml ${USUARIO}-$h | grep -q 'ubuntu.com/ubuntu/24.04'"
-        comprueba "sin ISO de cloud-init" bash -c "! virsh domblklist ${USUARIO}-$h | grep -q cloudinit"
-        comprueba "el agente reporta la IP $ip" bash -c "virsh domifaddr ${USUARIO}-$h --source agent | grep -q ' $ip/'"
+        comprueba "dominio en ejecución" bash -c "[ \"\$(virsh domstate ${PD}-$h)\" = running ]"
+        comprueba "4 discos virtio conectados (vda + vdb..vdd)" bash -c "[ \"\$(virsh domblklist ${PD}-$h | grep -c '^ vd')\" = 4 ]"
+        comprueba "COW de gluster-base.qcow2" bash -c "[ \"\$(qemu-img info -U --output=json '$SILO/${PF}$h.qcow2' | jq -r '.\"backing-filename\"')\" = ${PF}gluster-base.qcow2 ]"
+        comprueba "variante de SO ubuntu24.04" bash -c "virsh dumpxml ${PD}-$h | grep -q 'ubuntu.com/ubuntu/24.04'"
+        comprueba "sin ISO de cloud-init" bash -c "! virsh domblklist ${PD}-$h | grep -q cloudinit"
+        comprueba "on_reboot=restart en la definición en ejecución" reinicia_bien "${PD}-$h"
+        comprueba "el agente reporta la IP $ip" bash -c "virsh domifaddr ${PD}-$h --source agent | grep -q ' $ip/'"
 
         en_vm_es "$ip" "hostname"                    "$h"           hostname
-        en_vm_es "$ip" "cloud-init terminado"        "status: done" cloud-init status
-        en_vm_es "$ip" "cloud-init sin avisos (no 'degraded')" "extended_status: done" "cloud-init status --long | grep '^extended_status'"
+        en_vm_es "$ip" "cloud-init terminó (boot-finished)" "si"     "test -f /var/lib/cloud/instance/boot-finished && echo si"
+        en_vm_es "$ip" "cloud-init sin errores ni avisos" "0"        "$CI_SIN_ERRORES"
         en_vm_es "$ip" "3 montajes xfs en /gluster*" "3"            "mount -t xfs | grep -c ' /gluster[123] '"
         en_vm_es "$ip" "fstab con las líneas de crea-entorno.sh" "3" "grep -c '^/dev/vd[bcd] /gluster[123] xfs auto,async,nofail 0 0$' /etc/fstab"
         en_vm_es "$ip" "xfsprogs instalado"          "install ok installed" "dpkg-query -W -f='\${Status}' xfsprogs"
@@ -481,6 +530,8 @@ fase_c() {
     en_vm_es "$ip1" "gluster peer probe server4"     "peer probe: success" "sudo gluster peer probe server4"
     sleep 3
     en_vm_es "$ip1" "3 peers conectados"             "3" "sudo gluster peer status | grep -c 'State: Peer in Cluster (Connected)'"
+    comprueba "'sudo systemctl reboot' en server2: vuelve a arrancar (no se apaga)" reinicia_desde_dentro "${GW%.*}.11" "${PD}-server2"
+    en_vm_es "${GW%.*}.11" "server2 tras el reinicio: 3 montajes xfs" "3" "mount -t xfs | grep -c ' /gluster[123] '"
 
     # ---------- C1b: el epígrafe 2.9 e)-h): MySQL en Podman sobre vDisperso, en server4 ----------
     if [[ -n "${SIN_MYSQL:-}" ]]; then
@@ -508,18 +559,18 @@ fase_c() {
     # ---------- C2: rehacer los nodos reutilizando la base, con los 7 discos de crea-entorno.sh ----------
     titulo "C2: los 4 nodos de nuevo a partir de gluster-base.qcow2 (--limpiar --base) con --discos-nodo 7"
     inicio=$SECONDS
-    salida="$(ejecutar_script --limpiar --gluster-cluster --base gluster-base.qcow2 --discos-nodo 7 2>&1)"; rc=$?
+    salida="$(ejecutar_script ${PO[@]+"${PO[@]}"} --limpiar --gluster-cluster --base ${PF}gluster-base.qcow2 --discos-nodo 7 2>&1)"; rc=$?
     echo "$salida" >> "$LOG"
     info "tiempo total: $(( SECONDS - inicio ))s"
     [[ $rc == 0 ]] && ok "termina con código 0" || { ko "código $rc"; echo "$salida" | tail -12 | sed 's/^/    | /'; }
     grep -q "Fase 1 de 2: se omite" <<< "$salida" && ok "se omite la fase 1" || ko "no omitió la fase 1"
-    comprueba "gluster-base.qcow2 sigue existiendo (--limpiar no lo ha tocado)" test -f "$SILO/gluster-base.qcow2"
-    comprueba "los 4 nodos en ejecución" bash -c "[ \"\$(virsh list --name | grep -c '^${USUARIO}-server[1-4]$')\" = 4 ]"
-    comprueba "server3 es COW de gluster-base.qcow2" bash -c "[ \"\$(qemu-img info -U --output=json '$SILO/server3.qcow2' | jq -r '.\"backing-filename\"')\" = gluster-base.qcow2 ]"
-    comprueba "server3 con 8 discos virtio (vda + vdb..vdh)" bash -c "[ \"\$(virsh domblklist ${USUARIO}-server3 | grep -c '^ vd')\" = 8 ]"
+    comprueba "gluster-base.qcow2 sigue existiendo (--limpiar no lo ha tocado)" test -f "$SILO/${PF}gluster-base.qcow2"
+    comprueba "los 4 nodos en ejecución" bash -c "[ \"\$(virsh list --name | grep -c '^${PD}-server[1-4]$')\" = 4 ]"
+    comprueba "server3 es COW de gluster-base.qcow2" bash -c "[ \"\$(qemu-img info -U --output=json '$SILO/${PF}server3.qcow2' | jq -r '.\"backing-filename\"')\" = ${PF}gluster-base.qcow2 ]"
+    comprueba "server3 con 8 discos virtio (vda + vdb..vdh)" bash -c "[ \"\$(virsh domblklist ${PD}-server3 | grep -c '^ vd')\" = 8 ]"
     ip="${GW%.*}.12"
     en_vm_es "$ip" "server3: hostname"                    "server3"      hostname
-    en_vm_es "$ip" "server3: cloud-init terminado"        "status: done" cloud-init status
+    en_vm_es "$ip" "server3: cloud-init sin errores ni avisos" "0"     "$CI_SIN_ERRORES"
     en_vm_es "$ip" "server3: 3 montajes xfs en /gluster*" "3"            "mount -t xfs | grep -c ' /gluster[123] '"
     en_vm_es "$ip" "server3: vde..vdh sin formatear"      ""             "lsblk -no FSTYPE /dev/vde /dev/vdf /dev/vdg /dev/vdh | tr -d '\n '"
     en_vm_es "$ip" "server3: glusterd en ejecución"       "active"       systemctl is-active glusterd
@@ -528,13 +579,13 @@ fase_c() {
     echo
     if [[ -n "${CONSERVAR:-}" ]]; then
         info "CONSERVAR=1: el clúster se conserva. Para eliminarlo:"
-        echo "      $SCRIPT --eliminar server1 server2 server3 server4 gluster-base"
+        echo "      $SCRIPT ${PREFIJO:+--prefijo $PREFIJO }--eliminar server1 server2 server3 server4 gluster-base"
         info "OJO: la clave de pruebas se borra al terminar; solo podrás entrar por consola (root / s1st3mas)"
     else
-        salida="$(ejecutar_script --eliminar server1 server2 server3 server4 gluster-base 2>&1)"; rc=$?
+        salida="$(ejecutar_script ${PO[@]+"${PO[@]}"} --eliminar server1 server2 server3 server4 gluster-base 2>&1)"; rc=$?
         echo "$salida" >> "$LOG"
         [[ $rc == 0 ]] && ok "clúster eliminado con --eliminar" || ko "--eliminar del clúster: código $rc"
-        comprueba "no queda ningún nodo ni la base" bash -c "! virsh list --all --name | grep -qE '^${USUARIO}-(server[1-4]|gluster-base)$' && [ ! -e '$SILO/gluster-base.qcow2' ]"
+        comprueba "no queda ningún nodo ni la base" bash -c "! virsh list --all --name | grep -qE '^${PD}-(server[1-4]|gluster-base)$' && [ ! -e '$SILO/${PF}gluster-base.qcow2' ]"
         info "clúster eliminado (CONSERVAR=1 para mantenerlo)"
     fi
 }
@@ -571,6 +622,9 @@ case "$FASE" in
     todas) fase_a; fase_b; fase_c ;;
     *)     echo "Fase desconocida '$FASE'. Usa: a | b | c | todas"; exit 1 ;;
 esac
+
+# El --dry-run con el que se descubre la red deja sus ficheros: fuera
+rm -rf "$SILO/cloudinit-${USUARIO}-pruebas1.dry-run"
 
 echo
 echo "═══ Resultado: $OK correctas, $KO fallidas. Detalle en $LOG ═══"

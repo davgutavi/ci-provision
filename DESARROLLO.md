@@ -129,6 +129,14 @@ Cada ejecución deja un log completo en el silo (`pruebas-servidor-FECHA.log`).
   dentro de `$(...)` no sirve, porque se pierde al salir de la subshell.
 - Un dominio solo se trata como del alumno si sus discos están en el silo
   (`dominio_en_silo`): los nombres de dominio son de todo el servidor.
+- Con `--cloud-init`, virt-install arranca la máquina con una definición "de
+  instalación" con `on_reboot=destroy` (la persistente tiene `restart`) y
+  espera estar presente en el primer reinicio para volver a arrancarla. Con
+  `--noautoconsole` no lo está: el primer `reboot` dentro de la máquina la
+  apagaría, y una instantánea en caliente guardaría ese `destroy`. Por eso,
+  cuando cloud-init termina, el script la apaga y la arranca desde fuera
+  (`reiniciar_en_frio`, espera.sh) y comprueba `on_reboot` en `virsh dumpxml`.
+  Detectado al grabar el boletín 2 (19-oct-2026).
 - `virsh change-media --eject` con `--live --config` a la vez falla en cuanto
   una de las dos definiciones ya está limpia; se hacen por separado y se
   decide por el estado final.

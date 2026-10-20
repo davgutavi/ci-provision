@@ -20,7 +20,7 @@ export LC_ALL=C
 # siempre; solo para desarrollo se puede cambiar con CI_PROVISION_LIBVIRT_URI.
 export LIBVIRT_DEFAULT_URI="${CI_PROVISION_LIBVIRT_URI:-qemu:///system}"
 
-VERSION="3.0.0"
+VERSION="3.0.1"
 
 ########################################
 # Configuración general
@@ -258,8 +258,9 @@ al_salir() {
         echo "Lo creado se conserva: no se deshace nada. Comprueba su estado con:" >&2
         echo "  virsh list --all" >&2
         if $INTERRUMPIDO; then
-            echo "OJO: no se ha expulsado el medio de cloud-init. Antes de tomar instantáneas," >&2
-            echo "     apaga la máquina (virsh shutdown) o espera a que termine y expúlsalo." >&2
+            echo "OJO: no se ha expulsado el medio de cloud-init y la máquina se apagará en su primer" >&2
+            echo "     reinicio. Cuando termine de configurarse, apágala y arráncala desde fuera" >&2
+            echo "     (virsh shutdown NOMBRE; virsh start NOMBRE) antes de tomar instantáneas." >&2
         fi
     else
         revertir_cambios
@@ -1027,6 +1028,10 @@ mostrar_plan_maquina() {
         echo "Al terminar cloud-init, la máquina se apagaría y se eliminaría el dominio,"
         echo "dejando solo $(basename "$DISCO_MAIN") como imagen base."
         echo
+    else
+        echo "Al terminar cloud-init, se expulsaría su medio y la máquina se apagaría y se"
+        echo "volvería a arrancar, para que se ejecute con su configuración definitiva."
+        echo
     fi
     echo "No se ha creado ni modificado ninguna máquina, disco ni red."
 }
@@ -1056,12 +1061,16 @@ ejecutar_maquina() {
     if $NO_WAIT; then
         echo "Omitiendo la espera (--no-wait activo)."
         echo "NOTA: la máquina sigue configurándose por dentro. No se expulsa el medio de"
-        echo "      cloud-init; si vas a tomar instantáneas, apágala antes."
+        echo "      cloud-init ni se reinicia en frío."
+        aviso_on_reboot "$VM_NAME"
     else
-        # Solo se expulsa el medio de cloud-init si consta que la máquina ya
-        # terminó de configurarse: hacerlo antes podría interrumpir a cloud-init.
+        # Solo se expulsa el medio de cloud-init, y se reinicia, si consta que
+        # la máquina ya terminó de configurarse: antes interrumpiría a cloud-init.
         if esperar_maquinas "$VM_NAME"; then
             eject_cloudinit_media "$VM_NAME"
+            reiniciar_en_frio "$VM_NAME"
+        else
+            aviso_on_reboot "$VM_NAME"
         fi
     fi
 

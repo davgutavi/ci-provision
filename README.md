@@ -201,8 +201,14 @@ Todo lo que hace el asistente se puede hacer con las opciones de la tabla anteri
 
 Tras crear la máquina, el script **espera a que termine de configurarse por
 dentro** (instalación de paquetes y ajustes iniciales). Suele tardar entre uno y
-tres minutos; mientras tanto verás un contador. Al terminar muestra un resumen con
-los datos de la máquina y su IP.
+tres minutos; mientras tanto verás un contador. Después **la apaga y la vuelve a
+arrancar**: así se reinicia con normalidad cuando la reinicies desde dentro, y
+las instantáneas que tomes después conservan ese comportamiento. Al terminar
+muestra un resumen con los datos de la máquina y su IP.
+
+> ⚠️ Con `--no-wait` (o si la espera se agota) ese último paso no se hace, y la
+> máquina **se apagaría en su primer reinicio**. Cuando termine de configurarse,
+> apágala y arráncala tú: `virsh shutdown NOMBRE` y, ya apagada, `virsh start NOMBRE`.
 
 ### 🧹 Sobre `--limpiar`
 

@@ -1773,10 +1773,13 @@ esperar_maquinas() {
 # Apaga una máquina de forma limpia y espera a que esté parada.
 # Devuelve 1 si no se ha apagado en SHUTDOWN_TIMEOUT.
 apagar_maquina() {
+    virsh shutdown "$1" >/dev/null 2>&1 || true
+    esperar_apagada "$1"
+}
+
+# Espera a que una máquina esté parada (a quien ya se le ha pedido apagarse)
+esperar_apagada() {
     local vm="$1" inicio=$SECONDS estado
-
-    virsh shutdown "$vm" >/dev/null 2>&1 || true
-
     while true; do
         estado="$(virsh domstate "$vm" 2>/dev/null || true)"
         if [[ "$estado" == "shut off" ]]; then
@@ -1787,6 +1790,88 @@ apagar_maquina() {
         fi
         sleep 2
     done
+}
+
+########################################
+# Reinicio en frío al terminar
+#
+# Con --cloud-init, virt-install arranca la máquina con una definición "de
+# instalación" que tiene on_reboot=destroy: cuenta con estar él presente en el
+# primer reinicio para volver a arrancarla con la definición definitiva
+# (on_reboot=restart). Como el script lo lanza con --noautoconsole, termina
+# enseguida y nadie hace ese segundo arranque: el primer 'reboot' dentro de la
+# máquina la apagaría. Y una instantánea tomada en caliente guardaría ese
+# on_reboot=destroy, así que el problema volvería al revertirla.
+#
+# Apagándola y arrancándola desde fuera, pasa a ejecutarse con la definición
+# persistente, que es la buena. Solo se hace cuando cloud-init ya ha terminado:
+# antes lo interrumpiría.
+########################################
+
+# on_reboot de la definición con la que se está ejecutando la máquina
+on_reboot_vivo() {   # DOMINIO
+    local xml
+    xml="$(virsh dumpxml "$1" 2>/dev/null || true)"
+    sed -n 's:.*<on_reboot>\([a-z-]*\)</on_reboot>.*:\1:p' <<< "$xml"
+}
+
+# Aviso para cuando no se ha podido (o no se debía) reiniciar
+aviso_on_reboot() {   # DOMINIO...
+    echo "AVISO: tras crearlas, estas máquinas se apagan en su primer reinicio: $*" >&2
+    echo "       Cuando terminen de configurarse, apágalas y arráncalas desde fuera:" >&2
+    echo "         virsh shutdown NOMBRE   (y, cuando esté apagada)   virsh start NOMBRE" >&2
+    echo "       Hazlo antes de tomar instantáneas." >&2
+}
+
+reiniciar_en_frio() {   # DOMINIO...
+    local vm ip inicio
+    local -a arrancadas=() fallidas=() pendientes restantes
+
+    echo "→ Apagando y volviendo a arrancar ${#@} máquina(s), para que usen su configuración definitiva…"
+    for vm in "$@"; do
+        virsh shutdown "$vm" >/dev/null 2>&1 || true
+    done
+    for vm in "$@"; do
+        if esperar_apagada "$vm" && virsh start "$vm" >/dev/null 2>&1; then
+            arrancadas+=( "$vm" )
+        else
+            fallidas+=( "$vm" )
+        fi
+    done
+
+    # Que vuelvan a responder (con su IP fija, si la tienen)
+    inicio=$SECONDS
+    pendientes=( ${arrancadas[@]+"${arrancadas[@]}"} )
+    while (( ${#pendientes[@]} > 0 )); do
+        restantes=()
+        for vm in "${pendientes[@]}"; do
+            ip="$(obtener_ip_agente "$vm")"
+            if [[ -n "$ip" && ( -z "${IP_ESPERADA[$vm]:-}" || "$ip" == "${IP_ESPERADA[$vm]}" ) ]]; then
+                IPS_DETECTADAS[$vm]="$ip"
+            else
+                restantes+=( "$vm" )
+            fi
+        done
+        pendientes=( ${restantes[@]+"${restantes[@]}"} )
+        if (( ${#pendientes[@]} == 0 )); then break; fi
+        if (( SECONDS - inicio >= WAIT_TIMEOUT )); then
+            echo "AVISO: no han vuelto a responder en ${WAIT_TIMEOUT}s: ${pendientes[*]}" >&2
+            echo "       Comprueba su estado con: virsh list --all" >&2
+            break
+        fi
+        sleep "$POLL_SECS"
+    done
+
+    for vm in ${arrancadas[@]+"${arrancadas[@]}"}; do
+        if [[ "$(on_reboot_vivo "$vm")" == "restart" ]]; then
+            echo "✔ $vm reiniciada: ya puedes reiniciarla desde dentro y tomar instantáneas."
+        else
+            fallidas+=( "$vm" )
+        fi
+    done
+    if (( ${#fallidas[@]} > 0 )); then
+        aviso_on_reboot "${fallidas[@]}"
+    fi
 }
 
 ########################################
@@ -1977,6 +2062,9 @@ mostrar_plan_cluster() {
     echo "    Comando del primer nodo (los demás son iguales, con su nombre, IP y discos):"
     sed 's/^/    /' <<< "$comando_primero"
     echo
+    echo "Al terminar cloud-init en los nodos, se expulsaría su medio y se apagarían y se"
+    echo "volverían a arrancar, para que se ejecuten con su configuración definitiva."
+    echo
     echo "No se ha creado ni modificado ninguna máquina, disco ni red."
 }
 
@@ -2060,14 +2148,25 @@ ejecutar_cluster() {
     if $NO_WAIT; then
         echo "Omitiendo la espera (--no-wait activo)."
         echo "NOTA: los nodos siguen configurándose por dentro (discos xfs, /etc/hosts...)."
-        echo "      No se expulsa el medio de cloud-init; apágalos antes de tomar instantáneas."
+        echo "      No se expulsa el medio de cloud-init ni se reinician en frío."
+        aviso_on_reboot "${nodos_vm[@]}"
     else
+        local -a listos=() sin_terminar=()
         esperar_maquinas "${nodos_vm[@]}" || true
         for vm in "${nodos_vm[@]}"; do
             if [[ -n "${ESTADO_CI[$vm]:-}" ]]; then
                 eject_cloudinit_media "$vm"
+                listos+=( "$vm" )
+            else
+                sin_terminar+=( "$vm" )
             fi
         done
+        if (( ${#listos[@]} > 0 )); then
+            reiniciar_en_frio "${listos[@]}"
+        fi
+        if (( ${#sin_terminar[@]} > 0 )); then
+            aviso_on_reboot "${sin_terminar[@]}"
+        fi
     fi
 
     print_summary_cluster
@@ -2895,7 +2994,7 @@ export LC_ALL=C
 # siempre; solo para desarrollo se puede cambiar con CI_PROVISION_LIBVIRT_URI.
 export LIBVIRT_DEFAULT_URI="${CI_PROVISION_LIBVIRT_URI:-qemu:///system}"
 
-VERSION="3.0.0"
+VERSION="3.0.1"
 
 ########################################
 # Configuración general
@@ -3125,8 +3224,9 @@ al_salir() {
         echo "Lo creado se conserva: no se deshace nada. Comprueba su estado con:" >&2
         echo "  virsh list --all" >&2
         if $INTERRUMPIDO; then
-            echo "OJO: no se ha expulsado el medio de cloud-init. Antes de tomar instantáneas," >&2
-            echo "     apaga la máquina (virsh shutdown) o espera a que termine y expúlsalo." >&2
+            echo "OJO: no se ha expulsado el medio de cloud-init y la máquina se apagará en su primer" >&2
+            echo "     reinicio. Cuando termine de configurarse, apágala y arráncala desde fuera" >&2
+            echo "     (virsh shutdown NOMBRE; virsh start NOMBRE) antes de tomar instantáneas." >&2
         fi
     else
         revertir_cambios
@@ -3894,6 +3994,10 @@ mostrar_plan_maquina() {
         echo "Al terminar cloud-init, la máquina se apagaría y se eliminaría el dominio,"
         echo "dejando solo $(basename "$DISCO_MAIN") como imagen base."
         echo
+    else
+        echo "Al terminar cloud-init, se expulsaría su medio y la máquina se apagaría y se"
+        echo "volvería a arrancar, para que se ejecute con su configuración definitiva."
+        echo
     fi
     echo "No se ha creado ni modificado ninguna máquina, disco ni red."
 }
@@ -3923,12 +4027,16 @@ ejecutar_maquina() {
     if $NO_WAIT; then
         echo "Omitiendo la espera (--no-wait activo)."
         echo "NOTA: la máquina sigue configurándose por dentro. No se expulsa el medio de"
-        echo "      cloud-init; si vas a tomar instantáneas, apágala antes."
+        echo "      cloud-init ni se reinicia en frío."
+        aviso_on_reboot "$VM_NAME"
     else
-        # Solo se expulsa el medio de cloud-init si consta que la máquina ya
-        # terminó de configurarse: hacerlo antes podría interrumpir a cloud-init.
+        # Solo se expulsa el medio de cloud-init, y se reinicia, si consta que
+        # la máquina ya terminó de configurarse: antes interrumpiría a cloud-init.
         if esperar_maquinas "$VM_NAME"; then
             eject_cloudinit_media "$VM_NAME"
+            reiniciar_en_frio "$VM_NAME"
+        else
+            aviso_on_reboot "$VM_NAME"
         fi
     fi
 

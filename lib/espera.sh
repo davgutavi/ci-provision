@@ -202,10 +202,13 @@ esperar_maquinas() {
 # Apaga una máquina de forma limpia y espera a que esté parada.
 # Devuelve 1 si no se ha apagado en SHUTDOWN_TIMEOUT.
 apagar_maquina() {
+    virsh shutdown "$1" >/dev/null 2>&1 || true
+    esperar_apagada "$1"
+}
+
+# Espera a que una máquina esté parada (a quien ya se le ha pedido apagarse)
+esperar_apagada() {
     local vm="$1" inicio=$SECONDS estado
-
-    virsh shutdown "$vm" >/dev/null 2>&1 || true
-
     while true; do
         estado="$(virsh domstate "$vm" 2>/dev/null || true)"
         if [[ "$estado" == "shut off" ]]; then
@@ -216,4 +219,86 @@ apagar_maquina() {
         fi
         sleep 2
     done
+}
+
+########################################
+# Reinicio en frío al terminar
+#
+# Con --cloud-init, virt-install arranca la máquina con una definición "de
+# instalación" que tiene on_reboot=destroy: cuenta con estar él presente en el
+# primer reinicio para volver a arrancarla con la definición definitiva
+# (on_reboot=restart). Como el script lo lanza con --noautoconsole, termina
+# enseguida y nadie hace ese segundo arranque: el primer 'reboot' dentro de la
+# máquina la apagaría. Y una instantánea tomada en caliente guardaría ese
+# on_reboot=destroy, así que el problema volvería al revertirla.
+#
+# Apagándola y arrancándola desde fuera, pasa a ejecutarse con la definición
+# persistente, que es la buena. Solo se hace cuando cloud-init ya ha terminado:
+# antes lo interrumpiría.
+########################################
+
+# on_reboot de la definición con la que se está ejecutando la máquina
+on_reboot_vivo() {   # DOMINIO
+    local xml
+    xml="$(virsh dumpxml "$1" 2>/dev/null || true)"
+    sed -n 's:.*<on_reboot>\([a-z-]*\)</on_reboot>.*:\1:p' <<< "$xml"
+}
+
+# Aviso para cuando no se ha podido (o no se debía) reiniciar
+aviso_on_reboot() {   # DOMINIO...
+    echo "AVISO: tras crearlas, estas máquinas se apagan en su primer reinicio: $*" >&2
+    echo "       Cuando terminen de configurarse, apágalas y arráncalas desde fuera:" >&2
+    echo "         virsh shutdown NOMBRE   (y, cuando esté apagada)   virsh start NOMBRE" >&2
+    echo "       Hazlo antes de tomar instantáneas." >&2
+}
+
+reiniciar_en_frio() {   # DOMINIO...
+    local vm ip inicio
+    local -a arrancadas=() fallidas=() pendientes restantes
+
+    echo "→ Apagando y volviendo a arrancar ${#@} máquina(s), para que usen su configuración definitiva…"
+    for vm in "$@"; do
+        virsh shutdown "$vm" >/dev/null 2>&1 || true
+    done
+    for vm in "$@"; do
+        if esperar_apagada "$vm" && virsh start "$vm" >/dev/null 2>&1; then
+            arrancadas+=( "$vm" )
+        else
+            fallidas+=( "$vm" )
+        fi
+    done
+
+    # Que vuelvan a responder (con su IP fija, si la tienen)
+    inicio=$SECONDS
+    pendientes=( ${arrancadas[@]+"${arrancadas[@]}"} )
+    while (( ${#pendientes[@]} > 0 )); do
+        restantes=()
+        for vm in "${pendientes[@]}"; do
+            ip="$(obtener_ip_agente "$vm")"
+            if [[ -n "$ip" && ( -z "${IP_ESPERADA[$vm]:-}" || "$ip" == "${IP_ESPERADA[$vm]}" ) ]]; then
+                IPS_DETECTADAS[$vm]="$ip"
+            else
+                restantes+=( "$vm" )
+            fi
+        done
+        pendientes=( ${restantes[@]+"${restantes[@]}"} )
+        if (( ${#pendientes[@]} == 0 )); then break; fi
+        if (( SECONDS - inicio >= WAIT_TIMEOUT )); then
+            echo "AVISO: no han vuelto a responder en ${WAIT_TIMEOUT}s: ${pendientes[*]}" >&2
+            echo "       Comprueba su estado con: virsh list --all" >&2
+            break
+        fi
+        sleep "$POLL_SECS"
+    done
+
+    for vm in ${arrancadas[@]+"${arrancadas[@]}"}; do
+        if [[ "$(on_reboot_vivo "$vm")" == "restart" ]]; then
+            echo "✔ $vm reiniciada: ya puedes reiniciarla desde dentro y tomar instantáneas."
+        else
+            fallidas+=( "$vm" )
+        fi
+    done
+    if (( ${#fallidas[@]} > 0 )); then
+        aviso_on_reboot "${fallidas[@]}"
+    fi
 }

@@ -65,6 +65,9 @@ mkdir -p "$dir"
 echo "running" > "$dir/estado"
 printf '%s\n' "${discos[@]}" > "$dir/discos"
 touch "$dir/iso"
+# Como el virt-install real con --cloud-init: arranca con la definición de
+# instalación, que tiene on_reboot=destroy (la persistente tiene restart)
+echo destroy > "$dir/on_reboot_vivo"
 if [[ -n "${MOCK_ISO_PERSISTENTE:-}" ]]; then touch "$dir/iso_persistente"; fi
 
 # IP: la fija del network-config, o una "de DHCP"

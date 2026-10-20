@@ -1810,3 +1810,55 @@ qinfo() {
     # 17 ficheros (15 sueltos y las dos imágenes cloud): antes eran cientos de llamadas
     [ "$(wc -l < "$MOCK_STATE/qemu-img.n")" -le 20 ]
 }
+
+#############################################
+# Reinicio en frío al terminar (grabación del boletín 2, 19-oct)
+#############################################
+
+@test "reinicio en frío: la máquina acaba con on_reboot=restart en la definición en ejecución" {
+    run bash "$SCRIPT" --extra-disks server1 192.168.7.2
+    assert_success
+    # Orden: espera a cloud-init, expulsa el medio, apaga, arranca y comprueba
+    local orden
+    orden="$(grep -nE "change-media ${USUARIO}-server1|shutdown ${USUARIO}-server1|start ${USUARIO}-server1|dumpxml ${USUARIO}-server1" "$MOCK_STATE/log" | cut -d: -f2 | cut -d' ' -f2 | uniq | tr '\n' ' ')"
+    [ "$orden" = "change-media shutdown start dumpxml " ]
+    assert_output --partial "${USUARIO}-server1 reiniciada"
+    run virsh dumpxml "${USUARIO}-server1"
+    assert_output --partial "<on_reboot>restart</on_reboot>"
+    run virsh domstate "${USUARIO}-server1"
+    assert_output "running"
+}
+
+@test "reinicio en frío: también en los cuatro nodos del clúster" {
+    run bash "$SCRIPT" --gluster-cluster
+    assert_success
+    local i
+    for i in 1 2 3 4; do
+        [ "$(llamadas "^virsh start ${USUARIO}-server$i$")" -eq 1 ]
+        run virsh dumpxml "${USUARIO}-server$i"
+        assert_output --partial "<on_reboot>restart</on_reboot>"
+    done
+    # La base no se vuelve a arrancar: se elimina
+    [ "$(llamadas "^virsh start ${USUARIO}-gluster-base")" -eq 0 ]
+}
+
+@test "reinicio en frío: no se hace si cloud-init no ha terminado (--no-wait o tiempo agotado), y se avisa" {
+    run bash "$SCRIPT" --no-wait server1
+    assert_success
+    [ "$(llamadas '^virsh start')" -eq 0 ]
+    assert_output --partial "se apagan en su primer reinicio"
+    run virsh dumpxml "${USUARIO}-server1"
+    assert_output --partial "<on_reboot>destroy</on_reboot>"
+    MOCK_CI_RUNNING=999 CI_PROVISION_WAIT_TIMEOUT=3 run bash "$SCRIPT" server2
+    assert_success
+    [ "$(llamadas '^virsh start')" -eq 0 ]
+    assert_output --partial "se apagan en su primer reinicio"
+}
+
+@test "reinicio en frío: si la máquina no se apaga, se avisa y no se da por fallida" {
+    MOCK_SHUTDOWN_NUNCA=1 run bash "$SCRIPT" server1
+    assert_success
+    assert_output --partial "se apagan en su primer reinicio: ${USUARIO}-server1"
+    [ "$(llamadas '^virsh start')" -eq 0 ]
+    dominio_existe "${USUARIO}-server1"
+}

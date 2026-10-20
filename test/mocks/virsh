@@ -98,8 +98,30 @@ case "$cmd" in
         existe_dominio "$1" || { echo "error: failed to get domain '$1'" >&2; exit 1; }
         if [[ -z "${MOCK_SHUTDOWN_NUNCA:-}" ]]; then
             echo "shut off" > "$(dom_dir "$1")/estado"
+            # Al pararse, la definición en ejecución desaparece
+            rm -f "$(dom_dir "$1")/on_reboot_vivo" "$(dom_dir "$1")/iso"
         fi
         echo "Domain '$1' is being shutdown"
+        exit 0 ;;
+
+    start)
+        existe_dominio "$1" || { echo "error: failed to get domain '$1'" >&2; exit 1; }
+        if [[ "$(cat "$(dom_dir "$1")/estado")" == "running" ]]; then
+            echo "error: Requested operation is not valid: domain is already running" >&2
+            exit 1
+        fi
+        # Arranca con la definición persistente (on_reboot=restart)
+        echo "running" > "$(dom_dir "$1")/estado"
+        echo "Domain '$1' started"
+        exit 0 ;;
+
+    dumpxml)
+        existe_dominio "$1" || { echo "error: failed to get domain '$1'" >&2; exit 1; }
+        r=restart
+        if [[ "$(cat "$(dom_dir "$1")/estado")" == "running" && -f "$(dom_dir "$1")/on_reboot_vivo" ]]; then
+            r="$(cat "$(dom_dir "$1")/on_reboot_vivo")"
+        fi
+        printf "<domain type='kvm'>\n  <name>%s</name>\n  <on_poweroff>destroy</on_poweroff>\n  <on_reboot>%s</on_reboot>\n  <on_crash>destroy</on_crash>\n</domain>\n" "$1" "$r"
         exit 0 ;;
 
     destroy)

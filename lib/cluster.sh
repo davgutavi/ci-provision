@@ -186,6 +186,9 @@ mostrar_plan_cluster() {
     echo "    Comando del primer nodo (los demás son iguales, con su nombre, IP y discos):"
     sed 's/^/    /' <<< "$comando_primero"
     echo
+    echo "Al terminar cloud-init en los nodos, se expulsaría su medio y se apagarían y se"
+    echo "volverían a arrancar, para que se ejecuten con su configuración definitiva."
+    echo
     echo "No se ha creado ni modificado ninguna máquina, disco ni red."
 }
 
@@ -269,14 +272,25 @@ ejecutar_cluster() {
     if $NO_WAIT; then
         echo "Omitiendo la espera (--no-wait activo)."
         echo "NOTA: los nodos siguen configurándose por dentro (discos xfs, /etc/hosts...)."
-        echo "      No se expulsa el medio de cloud-init; apágalos antes de tomar instantáneas."
+        echo "      No se expulsa el medio de cloud-init ni se reinician en frío."
+        aviso_on_reboot "${nodos_vm[@]}"
     else
+        local -a listos=() sin_terminar=()
         esperar_maquinas "${nodos_vm[@]}" || true
         for vm in "${nodos_vm[@]}"; do
             if [[ -n "${ESTADO_CI[$vm]:-}" ]]; then
                 eject_cloudinit_media "$vm"
+                listos+=( "$vm" )
+            else
+                sin_terminar+=( "$vm" )
             fi
         done
+        if (( ${#listos[@]} > 0 )); then
+            reiniciar_en_frio "${listos[@]}"
+        fi
+        if (( ${#sin_terminar[@]} > 0 )); then
+            aviso_on_reboot "${sin_terminar[@]}"
+        fi
     fi
 
     print_summary_cluster
