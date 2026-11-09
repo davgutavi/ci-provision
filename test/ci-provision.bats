@@ -1138,6 +1138,11 @@ qinfo() {
     run bash "$SCRIPT" --prefijo demo --gluster-cluster --base gluster2.qcow2
     assert_success
     assert_output --partial "Fase 1 de 2: se omite"
+    # 3.0.2: el resumen no pega el nombre de la base a 'nodos' ni a server4
+    assert_output --partial "Para eliminar la infraestructura entera (nodos):"
+    assert_output --partial "--prefijo demo --eliminar server1 server2 server3 server4"$'\n'
+    refute_output --partial "gluster2.qcow2):"
+    refute_output --partial "server4gluster2"
     [ "$(qinfo "$SILO/demo-server1.qcow2" '."backing-filename"')" = "gluster2.qcow2" ]
     [ ! -e "$SILO/demo-gluster-base.qcow2" ]
     dominio_existe "demo-server4"

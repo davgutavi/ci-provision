@@ -220,8 +220,15 @@ print_summary_cluster() {
     echo "IMPORTANTE: no borres $base_disco."
     echo "            Los discos de los ${#CLUSTER_NODOS[@]} nodos dependen de él."
     echo
-    echo "Para eliminar la infraestructura entera (nodos${BASE_OPT:- e imagen base}):"
-    echo "  $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--eliminar ${CLUSTER_NODOS[*]}${BASE_OPT:+}${BASE_OPT:- $CLUSTER_BASE}"
+    # Con --base la imagen base no es de este clúster (puede haber otros
+    # colgando de ella): solo se sugiere eliminar los nodos
+    if [[ -n "$BASE_OPT" ]]; then
+        echo "Para eliminar la infraestructura entera (nodos):"
+        echo "  $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--eliminar ${CLUSTER_NODOS[*]}"
+    else
+        echo "Para eliminar la infraestructura entera (nodos e imagen base):"
+        echo "  $0 ${PREFIJO_OPT:+--prefijo $PREFIJO_OPT }--eliminar ${CLUSTER_NODOS[*]} $CLUSTER_BASE"
+    fi
     echo "-------------------------------------------"
 }
 
