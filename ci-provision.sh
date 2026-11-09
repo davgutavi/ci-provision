@@ -2831,6 +2831,10 @@ asistente_listar() {
     local d f sel estado ip lista n tipo
     local -a items=()
 
+    # El mapa de respaldos se vuelve a leer cada vez: lo que se haya creado o
+    # eliminado desde el menú (en otro proceso) no estaría en el de antes
+    RESPALDO=()
+    RESPALDOS_CARGADOS=false
     cargar_respaldos
 
     while IFS= read -r d; do
@@ -2965,8 +2969,10 @@ ejecutar_asistente() {   # [--directo] ARGUMENTO...
     clear 2>/dev/null || true
     echo "→ $mostrar"
     echo
-    # Ctrl+C lo atiende el proceso hijo, que deshace lo suyo; aquí se ignora
-    trap '' INT
+    # Ctrl+C lo atiende el proceso hijo, que deshace lo suyo; aquí se atiende
+    # sin hacer nada. No vale ignorarlo (trap '' INT): una señal ignorada se
+    # hereda ignorada y el hijo ya no podría atraparla ni deshacer nada.
+    trap ':' INT
     if [[ -n "$PASS_ASISTENTE" ]]; then
         CI_PROVISION_SSH_PASS="$PASS_ASISTENTE" bash "$0" "$@" || rc=$?
     else
@@ -3001,7 +3007,7 @@ export LC_ALL=C
 # siempre; solo para desarrollo se puede cambiar con CI_PROVISION_LIBVIRT_URI.
 export LIBVIRT_DEFAULT_URI="${CI_PROVISION_LIBVIRT_URI:-qemu:///system}"
 
-VERSION="3.0.2"
+VERSION="3.0.3"
 
 ########################################
 # Configuración general

@@ -20,7 +20,7 @@ export LC_ALL=C
 # siempre; solo para desarrollo se puede cambiar con CI_PROVISION_LIBVIRT_URI.
 export LIBVIRT_DEFAULT_URI="${CI_PROVISION_LIBVIRT_URI:-qemu:///system}"
 
-VERSION="3.0.2"
+VERSION="3.0.3"
 
 ########################################
 # Configuración general

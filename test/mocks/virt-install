@@ -6,6 +6,7 @@
 #   MOCK_VIRT_INSTALL_FALLA_TARDE=1  define el dominio y luego falla (error tardío o Ctrl+C)
 #   MOCK_VIRT_INSTALL_FALLA_EN=N     falla (sin crear nada) en la llamada número N
 #   MOCK_ISO_PERSISTENTE=1           la ISO de cloud-init queda también en la definición persistente
+#   MOCK_VIRT_INSTALL_CTRL_C=1       define el dominio y manda SIGINT al script que lo ha lanzado
 
 S="${MOCK_STATE:?MOCK_STATE no definido}"
 mkdir -p "$S/dominios"
@@ -80,6 +81,10 @@ if [[ -z "$ip" ]]; then
     ip="$(cat "$S/dhcp_base" 2>/dev/null || echo 192.168.7).$(( 200 + n ))"
 fi
 echo "$ip" > "$dir/ip"
+
+if [[ -n "${MOCK_VIRT_INSTALL_CTRL_C:-}" ]]; then
+    kill -INT "$PPID"
+fi
 
 if [[ -n "${MOCK_VIRT_INSTALL_FALLA_TARDE:-}" ]]; then
     echo "ERROR    error simulado de virt-install tras definir el dominio" >&2
