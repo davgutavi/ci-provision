@@ -322,7 +322,7 @@ conectados como `vdb`..`vdg`. Queda lista para todo el resto del bloque:
 - puedes tomar y revertir **instantáneas** (`virsh snapshot-create-as … --atomic`)
   en cuanto el script termina, encendida o apagada;
 - `root` tiene la contraseña `s1st3mas` en la consola, que es la que te pedirá la
-  máquina si arranca en **modo de rescate** (epígrafe 2.3);
+  máquina si arranca en **modo de emergencia** (epígrafe 2.3);
 - `apt` funciona, para instalar lo que pidan los ejercicios (por ejemplo, `lvm2`).
 
 ### **Si `server1` ya existía y quieres rehacerla desde cero**

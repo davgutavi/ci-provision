@@ -1340,7 +1340,7 @@ yaml_usuarios() {
 
     # root tiene contraseña para poder entrar por consola (por SSH no
     # entra: el sshd de Debian y el de Ubuntu traen PermitRootLogin
-    # prohibit-password). Hace falta, p.ej., en el modo de rescate del
+    # prohibit-password). Hace falta, p.ej., en el modo de emergencia del
     # epígrafe 2.3 del boletín 2. 'administrador' solo la tiene si se pide
     # --ssh-pass; si no, entra únicamente por SSH con su clave, igual que
     # en las máquinas que se crean a mano siguiendo el boletín.
