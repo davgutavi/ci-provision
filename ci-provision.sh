@@ -2621,9 +2621,27 @@ compactbutton=black,lightgray
 wt() {
     local out rc=0
     out="$(NEWT_COLORS="${NEWT_COLORS:-$PALETA_ASISTENTE}" LC_ALL="$LOCALE_UTF8" \
-           whiptail --title "ci-provision $VERSION" "$@" 3>&1 1>&2 2>&3)" || rc=$?
+           whiptail --title "ci-provision $VERSION" \
+               --ok-button Aceptar --cancel-button Cancelar --yes-button Sí --no-button No \
+               "$@" 3>&1 1>&2 2>&3)" || rc=$?
     printf '%s' "$out"
     return "$rc"
+}
+
+# Ancho máximo de una fila de la lista de máquinas. whiptail deja para el texto
+# de un --menu el ancho del cuadro menos 10 (78 - 10 = 68), y menos aún si
+# hay barra de desplazamiento; una fila más larga se pinta fuera del cuadro.
+ANCHO_FILA_LISTA=66
+
+# Recorta un texto a ANCHO caracteres (no bytes), acabando en «…» si no cabe
+recortar() {   # TEXTO ANCHO
+    local LC_ALL="$LOCALE_UTF8"
+    local t="$1"
+    if (( ${#t} > $2 )); then
+        printf '%s…' "${t:0:$(( $2 - 1 ))}"
+    else
+        printf '%s' "$t"
+    fi
 }
 
 # Convierte la salida de un --checklist ("a" "b") en etiquetas sueltas
@@ -2652,7 +2670,7 @@ asistente() {
     local sel
     while true; do
         sel="$(wt --notags --menu $'¿Qué quieres hacer?\n(muévete con las flechas y elige con Enter)' 20 78 8 \
-            basica   "Crear una máquina básica (boletín 1; Debian 12 propuesta)" \
+            basica   "Crear una máquina básica (Ubuntu 24.04 o Debian 12)" \
             extra    "Crear una máquina con IP .2 y 6 discos extra (boletín 2, epígrafe 2.1)" \
             cluster  "Crear la infraestructura GlusterFS (boletín 2, epígrafe 2.4)" \
             base     "Crear solo la imagen base GlusterFS" \
@@ -2760,12 +2778,8 @@ asistente_maquina() {   # basica | extra (IP .2 sugerida y discos extra marcados
     fi
     ip="$(wt --inputbox "$texto" 16 70 "$sugerida")" || return 0
 
-    # El boletín 1 usa Debian 12; el 2, Ubuntu 24.04
-    if [[ "$modo" == basica ]]; then
-        elegir_imagen_maquina debian12 || return 0
-    else
-        elegir_imagen_maquina noble || return 0
-    fi
+    # Se propone la imagen por defecto; Debian 12 queda a un cambio de marca
+    elegir_imagen_maquina "$IMAGEN_DEFECTO" || return 0
 
     marcado=off
     if [[ "$modo" == extra ]]; then marcado=on; fi
@@ -2828,7 +2842,7 @@ asistente_base() {
 
 # Lista de máquinas y discos sueltos; al elegir uno se abre su ficha
 asistente_listar() {
-    local d f sel estado ip lista n tipo
+    local d f sel estado ip lista n tipo desc
     local -a items=()
 
     # El mapa de respaldos se vuelve a leer cada vez: lo que se haya creado o
@@ -2845,14 +2859,21 @@ asistente_listar() {
         lista="$(discos_de_dominio "$d")"
         n=0
         if [[ -n "$lista" ]]; then n="$(grep -c . <<< "$lista" || true)"; fi
-        items+=( "m:$d" "$(rellenar "${d#"${PREFIJO_DOMINIO}-"}" 14) $(rellenar "$estado" 12) $(rellenar "$ip" 15) $n disco(s)" )
+        items+=( "m:$d" "$(recortar "$(rellenar "${d#"${PREFIJO_DOMINIO}-"}" 14) $(rellenar "$estado" 12) $(rellenar "$ip" 15) $n disco(s)" "$ANCHO_FILA_LISTA")" )
     done < <(dominios_propios)
 
     while IFS= read -r f; do
         if [[ -z "$f" ]]; then continue; fi
         tipo="sin máquina"
-        if imagen_protegida "$f"; then tipo="imagen cloud"; fi
-        items+=( "d:$f" "$(rellenar "$(basename "$f")" 14) $(rellenar "$tipo" 12) $(descripcion_disco_suelto "$f")" )
+        desc="$(descripcion_disco_suelto "$f")"
+        if imagen_protegida "$f"; then
+            # La columna ya dice «imagen cloud»: basta el sistema. El resto
+            # («no la borres») está en su ficha.
+            tipo="imagen cloud"
+            desc="${desc#imagen cloud de }"
+            desc="${desc%%:*}"
+        fi
+        items+=( "d:$f" "$(recortar "$(rellenar "$(basename "$f")" 14) $(rellenar "$tipo" 12) $desc" "$ANCHO_FILA_LISTA")" )
     done < <(discos_sin_maquina)
 
     if (( ${#items[@]} == 0 )); then
@@ -3007,7 +3028,7 @@ export LC_ALL=C
 # siempre; solo para desarrollo se puede cambiar con CI_PROVISION_LIBVIRT_URI.
 export LIBVIRT_DEFAULT_URI="${CI_PROVISION_LIBVIRT_URI:-qemu:///system}"
 
-VERSION="3.0.3"
+VERSION="3.0.4"
 
 ########################################
 # Configuración general

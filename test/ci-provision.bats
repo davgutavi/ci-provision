@@ -843,8 +843,10 @@ qinfo() {
     printf '%s\n' "0 basica" "0 server1" "0 " "0 debian12" "0 \"extra-disks\" \"no-root\"" "0" "0 salir" > "$MOCK_WHIPTAIL"
     run bash "$SCRIPT" --menu </dev/null
     assert_success
-    # La máquina básica es la del boletín 1: Debian 12 aparece marcada
-    grep -q -- '--radiolist .* noble Ubuntu 24.04 (boletín 2) off debian12 Debian 12 (boletín 1) on$' "$MOCK_STATE/log"
+    # 3.0.4: la máquina básica propone la imagen por defecto (Ubuntu 24.04)
+    grep -q -- '--radiolist .* noble Ubuntu 24.04 (boletín 2) on debian12 Debian 12 (boletín 1) off$' "$MOCK_STATE/log"
+    # Botones en español
+    grep -q -- '--ok-button Aceptar --cancel-button Cancelar --yes-button Sí --no-button No' "$MOCK_STATE/log"
     assert_output --partial "→ $SCRIPT --imagen debian12 --extra-disks --no-root server1"
     assert_output --partial "Sin cambios."
     dominio_existe "${USUARIO}-server1"
@@ -936,6 +938,37 @@ qinfo() {
     assert_success
     dominio_existe "${USUARIO}-server1"
     grep -q -- "          server1.qcow2 (copia de debian12.qcow2)" "$MOCK_STATE/log"
+}
+
+@test "3.0.4: la lista del asistente cabe en el cuadro y no repite «imagen cloud»" {
+    run bash "$SCRIPT" --imagen debian12 --glusterfs glusterbase
+    assert_success
+    run bash "$SCRIPT" --extra-disks un-nombre-de-maquina-bastante-largo
+    assert_success
+    export MOCK_WHIPTAIL="$BATS_TEST_TMPDIR/respuestas"
+    printf '%s\n' "0 listar" "1" "1" > "$MOCK_WHIPTAIL"
+    run bash "$SCRIPT" --menu </dev/null
+    assert_success
+    # El texto del menú lleva un salto de línea: las filas van en la siguiente
+    linea="$(grep -A1 -- '--notags --menu Mis máquinas virtuales' "$MOCK_STATE/log" | tail -n1)"
+    [[ "$linea" == *"noble-server-cloudimg-amd64.img imagen cloud Ubuntu 24.04"* ]]
+    [[ "$linea" == *"debian12.qcow2 imagen cloud Debian 12"* ]]
+    [[ "$linea" != *"imagen cloud imagen cloud"* ]]
+    # Cada fila es lo que va entre su etiqueta y la siguiente: ninguna pasa
+    # de 66 caracteres, y la de la máquina de nombre largo acaba en «…»
+    python3 - "$linea" "m:${USUARIO}-un-nombre-de-maquina-bastante-largo" \
+        "d:$SILO/debian12.qcow2" "d:$SILO/glusterbase.qcow2" "d:$SILO/noble-server-cloudimg-amd64.img" <<'PY'
+import sys
+linea, etiquetas = sys.argv[1], sys.argv[2:]
+pos = sorted((linea.index(" " + e + " "), e) for e in etiquetas)
+for k, (p, e) in enumerate(pos):
+    ini = p + len(e) + 2
+    fin = pos[k + 1][0] if k + 1 < len(pos) else len(linea)
+    fila = linea[ini:fin]
+    assert len(fila) <= 66, (e, len(fila), fila)
+    if e.startswith("m:"):
+        assert fila.endswith("…"), fila
+PY
 }
 
 @test "--menu: la contraseña no se muestra en el comando; sin whiptail, error 38; sin más opciones" {
